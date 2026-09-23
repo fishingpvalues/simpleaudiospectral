@@ -1,4 +1,5 @@
 """End-to-end over HTTP against a temp library of ffmpeg-generated files."""
+
 import importlib
 import json
 import os
@@ -27,14 +28,22 @@ def server(tmp_path_factory):
     ff("-f", "lavfi", "-i", src, "-sample_fmt", "s16", str(album / "01 real.flac"))
     ff("-f", "lavfi", "-i", src, "-c:a", "libmp3lame", "-b:a", "128k", str(lib / "tmp.mp3"))
     ff("-i", str(lib / "tmp.mp3"), "-sample_fmt", "s16", str(album / "02 transcode.flac"))
-    ff("-i", str(album / "01 real.flac"), "-sample_fmt", "s32", "-bits_per_raw_sample", "24",
-       str(lib / "padded24.flac"))
+    ff(
+        "-i",
+        str(album / "01 real.flac"),
+        "-sample_fmt",
+        "s32",
+        "-bits_per_raw_sample",
+        "24",
+        str(lib / "padded24.flac"),
+    )
     (lib / "tmp.mp3").unlink()
     os.environ["LIBRARY_ROOT"] = str(lib)
     os.environ["CACHE_DIR"] = str(tmp_path_factory.mktemp("cache"))
     os.environ["WEB_DIR"] = str(tmp_path_factory.mktemp("web"))
     (tmp_path_factory.getbasetemp() / "web0" / "index.html").write_text("<!doctype html><title>t</title>")
     import app as mod
+
     mod = importlib.reload(mod)
     srv = mod.ThreadingHTTPServer(("127.0.0.1", 0), mod.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -64,6 +73,7 @@ def test_ls(server):
 
 def test_roots_and_search(server, monkeypatch):
     import app
+
     app.INDEX._build()
     code, r = jget(server, "/api/roots")
     assert code == 200 and [x["name"] for x in r["roots"]] == ["Artist"]
@@ -74,7 +84,11 @@ def test_roots_and_search(server, monkeypatch):
 
 
 def test_traversal_blocked(server):
-    for p in ("/api/ls?path=../..", "/api/info?path=../../../etc/passwd", "/api/audio?path=%2e%2e/%2e%2e/etc/passwd"):
+    for p in (
+        "/api/ls?path=../..",
+        "/api/info?path=../../../etc/passwd",
+        "/api/audio?path=%2e%2e/%2e%2e/etc/passwd",
+    ):
         assert get(server, p)[0] == 403
 
 
@@ -93,7 +107,7 @@ def test_stats_padded_24bit(server):
 
 
 def test_scan_streams_every_track(server):
-    code, h, body = get(server, "/api/scan?path=Artist/Album")
+    code, _h, body = get(server, "/api/scan?path=Artist/Album")
     lines = [json.loads(x) for x in body.decode().splitlines() if x.strip()]
     assert code == 200 and lines[0] == {"total": 2}
     rows = {r["name"]: r for r in lines[1:]}
@@ -120,7 +134,7 @@ def test_audio_range(server):
 
 
 def test_sox_png(server):
-    code, h, body = get(server, "/api/spectrogram?path=Artist/Album/01%20real.flac&x=600")
+    code, _h, body = get(server, "/api/spectrogram?path=Artist/Album/01%20real.flac&x=600")
     assert code == 200 and body[:8] == b"\x89PNG\r\n\x1a\n"
 
 
@@ -130,5 +144,17 @@ def test_spa_fallback_and_404(server):
 
 
 def test_audio_transcode_stream(server):
-    code, h, body = get(server, "/api/audio?path=Artist/Album/01%20real.flac&format=flac")
+    code, _h, body = get(server, "/api/audio?path=Artist/Album/01%20real.flac&format=flac")
     assert code == 200 and body[:4] == b"fLaC"
+
+
+def test_health_reports_version(server):
+    code, d = jget(server, "/api/health")
+    assert code == 200 and d["status"] == "ok" and d["version"]
+
+
+def test_pcm_is_disk_backed_memmap(server):
+    import app
+
+    mm, sr = app.PCM.open(os.path.join(app.ROOT, "Artist/Album/01 real.flac"))
+    assert isinstance(mm, np.memmap) and mm.shape[1] == 2 and sr == 48000

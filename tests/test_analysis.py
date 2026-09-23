@@ -1,4 +1,5 @@
 """DSP regression pins on synthetic signals - no files, no network."""
+
 import importlib
 import os
 import sys
@@ -15,6 +16,7 @@ def app(tmp_path_factory):
     os.environ["LIBRARY_ROOT"] = str(root)
     os.environ["CACHE_DIR"] = str(tmp_path_factory.mktemp("cache"))
     import app as mod
+
     return importlib.reload(mod)
 
 
@@ -148,29 +150,99 @@ def test_dr_meter_sine_vs_compressed(app):
 
 def test_clip_events(app):
     x = np.zeros(44100 * 6, np.float32)
-    x[1000:1005] = 1.0     # 5-sample run: counts
-    x[5000:5002] = -1.0    # 2-sample run: does not
+    x[1000:1005] = 1.0  # 5-sample run: counts
+    x[5000:5002] = -1.0  # 2-sample run: does not
     assert app.dynamics(x, x * 0 + x, 44100)["clipEvents"] == 2  # both channels
 
 
 def test_loudness_parses_ffmpeg(app, tmp_path):
     import subprocess
+
     f = tmp_path / "s.flac"
-    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=997:duration=4",
-                    "-af", "volume=0.5", "-ac", "2", str(f)], check=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=997:duration=4",
+            "-af",
+            "volume=0.5",
+            "-ac",
+            "2",
+            str(f),
+        ],
+        check=True,
+    )
     L = app.loudness(str(f))
     assert L["lufs"] is not None and -40 < L["lufs"] < -10
-    assert L["truePeakDb"] is not None and L["samplePeakDb"] is not None
+    assert L["samplePeakDb"] is not None and L["lra"] is not None  # true peak: true_peak()
 
 
 def test_clicks_isolated_vs_dense_transients(app):
     sr = 44100
     quiet = noise(sr, 60) * 0.05
     clicky = quiet.copy()
-    clicky[:: sr // 2] += 0.8          # 120 isolated 1-sample clicks per minute
+    clicky[:: sr // 2] += 0.8  # 120 isolated 1-sample clicks per minute
     d_click = app.dynamics(clicky, clicky.copy(), sr)
     # dense loud material: every sample is a "transient", none is isolated
     dense = noise(sr, 60)
     d_dense = app.dynamics(dense, dense.copy(), sr)
     assert d_click["clicksPerMin"] > 60
     assert d_dense["clicksPerMin"] < 5
+
+
+def test_chunked_passes_match_whole_array(app, monkeypatch):
+    """Chunking is how long DJ sets fit in memory; results must not depend on it."""
+    sr = 44100
+    left = noise(sr, 40, seed=3)
+    right = noise(sr, 40, seed=4)
+    left[5000:5010] = 1.0
+    whole_dyn = app.dynamics(left, right, sr)
+    whole_peaks = app.peaks(left, sr, 0, 40, 300)
+    whole_floor = app.quiet_floor(left, sr)
+    monkeypatch.setattr(app, "CHUNK", 7919)  # prime: never aligned with any block
+    small_dyn = app.dynamics(left, right, sr)
+    assert small_dyn["dr"] == whole_dyn["dr"]
+    assert small_dyn["drPerChannel"] == whole_dyn["drPerChannel"]
+    assert small_dyn["clipEvents"] == whole_dyn["clipEvents"] == 1
+    assert abs(small_dyn["correlation"] - whole_dyn["correlation"]) < 1e-9
+    assert app.peaks(left, sr, 0, 40, 300) == whole_peaks
+    assert app.quiet_floor(left, sr) == whole_floor
+
+
+def test_derived_mix_side_match_numpy(app):
+    rng = np.random.default_rng(5)
+    mm = rng.standard_normal((10000, 2)).astype(np.float32)
+    mix, side = app.Derived(mm, "mix"), app.Derived(mm, "side")
+    np.testing.assert_allclose(mix[100:200], (mm[100:200, 0] + mm[100:200, 1]) / 2, rtol=1e-6)
+    np.testing.assert_allclose(side[::7], (mm[::7, 0] - mm[::7, 1]) / 2, rtol=1e-6)
+    idx = np.array([[-5, 0, 9999, 20000]])
+    np.testing.assert_allclose(
+        mix.take(idx), (mm[[0, 0, 9999, 9999], 0] + mm[[0, 0, 9999, 9999], 1])[None] / 2, rtol=1e-6
+    )
+    assert len(mix) == 10000
+
+
+def test_summary_peaks_match_sample_peaks(app):
+    sr = 44100
+    x = noise(sr, 30, seed=6)
+    sm = app.Summary(x, x.copy(), sr)
+    a = np.frombuffer(app.summary_peaks(sm, "left", 0, 30, 60), np.float32).reshape(-1, 2)
+    b = np.frombuffer(app.peaks(x, sr, 0, 30, 60), np.float32).reshape(-1, 2)
+    np.testing.assert_allclose(a, b, atol=1e-6)
+
+
+def test_true_peak_finds_intersample_peak(app):
+    # A sine at fs/4 with a 45 degree phase: every sample sits at 0.707 of the
+    # amplitude, so the sample peak under-reads the true peak by 3.01 dB.
+    sr = 48000
+    t = np.arange(sr * 10)
+    x = (0.5 * np.sin(2 * np.pi * t / 4 + np.pi / 4)).astype(np.float32)
+    sm = app.Summary(x, x.copy(), sr)
+    sample_peak = 20 * np.log10(np.abs(x).max())
+    tp = app.true_peak(sm, x, x.copy(), sr)
+    assert abs(sample_peak - (-9.03)) < 0.05
+    assert abs(tp - (-6.02)) < 0.2
