@@ -1,0 +1,54 @@
+[project]
+name = "simpleaudiospectral"
+version = "0.0.1"
+description = "Spectral analysis for verifying lossless audio"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3,<3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "ruff>=0.13",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["web"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "SIM",      # simplify
+    "S",        # bandit (security)
+    "PL",       # pylint subset
+    "RUF",
+]
+ignore = [
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004",  # DSP code: many branches and literal thresholds by design
+    "S603", "S607",   # subprocess with fixed argv lists to ffmpeg/sox, never a shell
+    "PLW0603",        # module-level caches
+    "E731",
+    "PLR0917",        # DSP entry points take the viewport as positional args
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S108", "PLC0415", "S310"]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,6 +1,6 @@
 services:
   simpleaudiospectral:
-    build: https://github.com/fishingpvalues/simpleaudiospectral.git#main
+    image: ghcr.io/fishingpvalues/simpleaudiospectral:latest
     container_name: simpleaudiospectral
     user: "1000:1000"
     read_only: true
@@ -14,11 +14,15 @@ services:
       # Tailscale serve or similar in front. Never publish it on 0.0.0.0.
       - "127.0.0.1:4748:4748"
     environment:
-      PCM_CACHE_MB: "600"
+      PCM_DISK_GB: "20"
     volumes:
+      - pcm:/pcm
       - /path/to/music:/library/music:ro
     restart: unless-stopped
     deploy:
       resources:
         limits:
           memory: 1536M
+
+volumes:
+  pcm:

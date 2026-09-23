@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "labels": ["dependencies"],
+  "schedule": ["before 9am on Monday"],
+  "packageRules": [
+    { "matchManagers": ["npm", "pep621", "dockerfile", "github-actions"], "matchUpdateTypes": ["minor", "patch", "digest"], "automerge": true },
+    { "matchPackageNames": ["typescript"], "allowedVersions": "<7", "description": "typescript-eslint does not support the native TS 7 compiler yet" },
+    { "matchPackageNames": ["eslint", "@eslint/js"], "allowedVersions": "<10", "description": "eslint-plugin-jsx-a11y has no ESLint 10 support yet" }
+  ]
+}

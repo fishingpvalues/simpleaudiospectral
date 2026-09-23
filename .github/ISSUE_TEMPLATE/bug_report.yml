@@ -1,0 +1,27 @@
+name: Bug report
+description: Something is measured or shown wrongly, or the app fails
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown in the page header, or GET /api/health
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: file
+    attributes:
+      label: The file
+      description: Codec, sample rate, bit depth, and how it was made (encoder and settings) if known. Do not attach copyrighted audio.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Container log
+      render: text

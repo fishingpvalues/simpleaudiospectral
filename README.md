@@ -1,5 +1,9 @@
 # simpleaudiospectral
 
+[![CI](https://github.com/fishingpvalues/simpleaudiospectral/actions/workflows/ci.yml/badge.svg)](https://github.com/fishingpvalues/simpleaudiospectral/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/fishingpvalues/simpleaudiospectral?sort=semver)](https://github.com/fishingpvalues/simpleaudiospectral/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 simpleaudiospectral is a self-hosted web application for checking whether
 audio files are what they claim to be. It shows a spectrogram, waveform and
 loudness analysis of any track in a mounted music library, and flags lossy
@@ -86,27 +90,38 @@ Licensed under the MIT license. See [LICENSE](LICENSE).
 
 ## Quick start
 
-The image is built from this repository. Docker builds straight from the Git
-URL, so no local checkout is needed.
+Multi-arch images (linux/amd64, linux/arm64) are published to the GitHub
+Container Registry for every release.
 
 ```sh
-docker build -t simpleaudiospectral https://github.com/fishingpvalues/simpleaudiospectral.git#main
-
 docker run -d --name simpleaudiospectral \
   --read-only --tmpfs /cache --tmpfs /tmp \
   -p 127.0.0.1:4748:4748 \
+  -v simpleaudiospectral-pcm:/pcm \
   -v /path/to/music:/library/music:ro \
-  simpleaudiospectral
+  ghcr.io/fishingpvalues/simpleaudiospectral:latest
 ```
 
 Open `http://127.0.0.1:4748`.
+
+| Tag | Meaning |
+|---|---|
+| `0.0.2`, `0.0` | A release, and the newest release of that line |
+| `latest` | The newest release |
+| `beta`, `sha-<commit>` | The current `main` branch, built on every push |
+
+To build from source instead:
+
+```sh
+docker build -t simpleaudiospectral https://github.com/fishingpvalues/simpleaudiospectral.git#main
+```
 
 ### Docker Compose
 
 ```yaml
 services:
   simpleaudiospectral:
-    build: https://github.com/fishingpvalues/simpleaudiospectral.git#main
+    image: ghcr.io/fishingpvalues/simpleaudiospectral:latest
     container_name: simpleaudiospectral
     user: "1000:1000"
     read_only: true
@@ -118,8 +133,9 @@ services:
     ports:
       - "127.0.0.1:4748:4748"
     environment:
-      PCM_CACHE_MB: "600"
+      PCM_DISK_GB: "20"
     volumes:
+      - pcm:/pcm
       - /path/to/music:/library/music:ro
       - /path/to/rips:/library/rips:ro
     restart: unless-stopped
@@ -127,6 +143,9 @@ services:
       resources:
         limits:
           memory: 1536M
+
+volumes:
+  pcm:
 ```
 
 ```sh
@@ -144,13 +163,18 @@ writes to the library.
 | `LIBRARY_ROOT` | `/library` | Root of the browsable library. |
 | `PORT` | `4748` | Listening port inside the container. |
 | `CACHE_DIR` | `/cache` | SoX PNG cache. A tmpfs is sufficient. |
-| `PCM_CACHE_MB` | `600` | Memory for decoded audio kept for pan and zoom. |
+| `PCM_DIR` | `/pcm` | Disk cache of decoded audio, memory-mapped. Mount a volume here. |
+| `PCM_DISK_GB` | `20` | Size limit of that cache; the least recently used files go first. |
 | `MAX_JOBS` | `3` | Concurrent decode and analysis jobs. |
 | `INDEX_INTERVAL` | `900` | Seconds between rebuilds of the search index. |
 | `ACCESS_LOG` | unset | Set to any value to log requests. |
 
-Memory use is dominated by the PCM cache. A four-minute 44.1 kHz stereo
-track takes about 42 MB per channel view.
+Every file is decoded once to 32-bit float PCM on disk (about 1.3 GB per
+hour of 48 kHz stereo) and memory-mapped. Whole-track statistics come from a
+single chunked pass, so memory stays flat regardless of length: a three-hour
+DJ set peaks at about 330 MB of heap in a 1.5 GB container. Without a volume
+on `/pcm` the cache falls back to `/cache`, which is usually a tmpfs and
+therefore RAM.
 
 ## How the verdict is reached
 
@@ -257,21 +281,41 @@ curl -sN 'http://127.0.0.1:4748/api/scan?path=music/Artist/Album'
 
 ## Development
 
-The backend is a single Python file using numpy, ffmpeg and SoX. The
-frontend is React, TypeScript, Vite and Tailwind CSS with Radix-based
-components. Everything is bundled into the image, fonts included, so the page
-loads nothing from third-party hosts.
+The backend is a single Python file using numpy, ffmpeg and SoX, managed with
+[uv](https://docs.astral.sh/uv/). The frontend is React, TypeScript, Vite and
+Tailwind CSS with Radix-based components. Everything is bundled into the
+image, fonts included, so the page loads nothing from third-party hosts.
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install numpy pytest
-make test          # 29 tests: DSP on synthetic signals, HTTP end to end
-make web           # build the UI into web/dist
-make dev           # API on :4748 against ./library, Vite dev server on :5173
-make build         # container image
+uv sync                 # Python dependencies from uv.lock
+make web                # build the UI into web/dist
+make dev                # API on :4748 against ./library, Vite dev server on :5173
+make check              # ruff, prettier, eslint, tsc and the test suite
+make hooks-install      # lefthook: format on commit, Conventional Commits, check on push
 ```
 
 The tests need `ffmpeg` and `sox` on the path. They generate their own audio
 and need no network.
+
+| Area | Tool |
+|---|---|
+| Python dependencies | uv |
+| Python lint and format | ruff |
+| Python tests | pytest |
+| Web lint | eslint (typescript-eslint, react-hooks, jsx-a11y) |
+| Web format | prettier with the Tailwind plugin |
+| Container | hadolint, Trivy, multi-arch buildx |
+| Dependencies | Renovate |
+
+### Releases
+
+Versions follow `0.0.x` while the project is pre-1.0. Commits on `main` use
+[Conventional Commits](https://www.conventionalcommits.org/).
+[release-please](https://github.com/googleapis/release-please) collects them
+into a release pull request that updates `CHANGELOG.md` and the version.
+Merging that pull request tags the release. The tag builds and pushes the
+GHCR image with an SBOM and build provenance attestation. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 

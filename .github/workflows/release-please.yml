@@ -1,0 +1,49 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Opens or updates a release PR from the Conventional Commits since the
+      # last release, writing CHANGELOG.md and version.txt. Merging it creates
+      # the vX.Y.Z tag and GitHub release.
+      #
+      # Pre-1.0 on purpose: bump-patch-for-minor-pre-major keeps feat: at
+      # 0.0.x and bump-minor-pre-major keeps a breaking change at 0.x.0.
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+
+  # A tag pushed with GITHUB_TOKEN does not trigger other workflows, so the
+  # release build is called directly; a reusable-workflow call runs inside
+  # this run and needs no PAT.
+  build:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit

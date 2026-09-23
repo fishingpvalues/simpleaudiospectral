@@ -1,0 +1,32 @@
+# make hooks-install
+pre-commit:
+  parallel: true
+  commands:
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format {staged_files} && git add {staged_files}
+    ruff-check:
+      glob: "*.py"
+      run: uv run ruff check {staged_files}
+    prettier:
+      root: web/
+      glob: "*.{ts,tsx,js,json,css,html}"
+      run: npx prettier --write {staged_files} && git add {staged_files}
+    eslint:
+      root: web/
+      glob: "*.{ts,tsx}"
+      run: npx eslint {staged_files}
+
+commit-msg:
+  commands:
+    conventional:
+      run: |
+        head -1 "{1}" | grep -qE "^(feat|fix|perf|refactor|docs|test|ci|build|chore|style|revert)(\(.+\))?!?: " || {
+          echo "Commit subject must be a Conventional Commit (feat: ..., fix: ...). It becomes release-note text."
+          exit 1
+        }
+
+pre-push:
+  commands:
+    check:
+      run: make check
