@@ -246,3 +246,10 @@ def test_true_peak_finds_intersample_peak(app):
     tp = app.true_peak(sm, x, x.copy(), sr)
     assert abs(sample_peak - (-9.03)) < 0.05
     assert abs(tp - (-6.02)) < 0.2
+
+
+def test_mp3_lowpass_in_48k_file_is_not_called_a_resample(app):
+    # A 320k MP3 decoded at 48 kHz: wall at 20.2 kHz with sfb21 variability.
+    sr = 48000
+    a = run(app, sfb21(noise(sr), sr, 20200), sr)
+    assert a["resampledFrom"] is None and "MP3" in a["family"]

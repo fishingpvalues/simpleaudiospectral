@@ -573,10 +573,14 @@ def analyse_pcm(x, side, sr, summary=None, levels=True):
         hf_sd = round(float(r.std()), 1)
 
     # Resampled from a lower rate: a wall just under a standard Nyquist.
+    # A resampler's anti-alias filter sits within ~5% of the source Nyquist.
+    # An MP3 lowpass can land in the same place (320k at 20.2 kHz is 92% of
+    # 22.05), so an MP3-style sfb21 signature wins: that wall is the encoder.
     resampled_from = None
-    if cutoff_hz:
+    mp3_like = hf_sd is not None and hf_sd >= 10
+    if cutoff_hz and not mp3_like:
         for src_sr in (16000, 22050, 32000, 44100, 48000):
-            if src_sr / 2 < nyq - 1000 and 0.9 * src_sr / 2 <= cutoff_hz <= src_sr / 2 + 100:
+            if src_sr / 2 < nyq - 1000 and 0.94 * src_sr / 2 <= cutoff_hz <= src_sr / 2 + 100:
                 resampled_from = src_sr
 
     # CRT / TV line whine (15.625 kHz PAL, 15.734 kHz NTSC): a narrow tone that

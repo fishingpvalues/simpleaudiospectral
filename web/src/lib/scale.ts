@@ -64,9 +64,11 @@ export function fmtTime(t: number, step = 1): string {
   // Round once, up front: 59.6 s at 0 decimals must become 1:00, not 0:60.
   const f = Math.pow(10, dec)
   const s = Math.round(Math.max(0, t) * f) / f
-  const m = Math.floor(s / 60)
-  const sec = s - m * 60
-  return `${m}:${sec.toFixed(dec).padStart(dec ? 3 + dec : 2, "0")}`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s - h * 3600) / 60)
+  const sec = s - h * 3600 - m * 60
+  const ss = sec.toFixed(dec).padStart(dec ? 3 + dec : 2, "0")
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`
 }
 
 export function fmtHz(f: number, precise = false): string {
