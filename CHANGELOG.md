@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.3](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.2...v0.0.3) (2026-09-23)
+
+
+### Features
+
+* every measurement is exact over the whole file ([4fb0cbe](https://github.com/fishingpvalues/simpleaudiospectral/commit/4fb0cbec3d1826a560d342d7af4d28c4611a426f))
+* **ui:** analysis progress for long files ([98d2bf0](https://github.com/fishingpvalues/simpleaudiospectral/commit/98d2bf0075826108a7fe01f00f8fc0ca6cccdffa))
+
 ## [0.0.2](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.1...v0.0.2) (2026-09-23)
 
 
