@@ -169,12 +169,34 @@ writes to the library.
 | `INDEX_INTERVAL` | `900` | Seconds between rebuilds of the search index. |
 | `ACCESS_LOG` | unset | Set to any value to log requests. |
 
-Every file is decoded once to 32-bit float PCM on disk (about 1.3 GB per
-hour of 48 kHz stereo) and memory-mapped. Whole-track statistics come from a
-single chunked pass, so memory stays flat regardless of length: a three-hour
-DJ set peaks at about 330 MB of heap in a 1.5 GB container. Without a volume
-on `/pcm` the cache falls back to `/cache`, which is usually a tmpfs and
-therefore RAM.
+Every file is decoded once to 32-bit float PCM on disk and memory-mapped, so
+memory does not grow with the length of a file; a three-hour DJ set was
+measured at 73 MiB of heap in a 1.5 GB container. Without a volume on `/pcm`
+the cache falls back to `/cache`, which is usually a tmpfs and therefore RAM.
+
+## Accuracy
+
+Every measurement covers the whole file: every frame, every block, every
+sample. Nothing is sampled, capped or estimated.
+
+- **Precision.** Samples are decoded to 32-bit float, which represents every
+  16-bit and 24-bit PCM value exactly. All analysis (FFT, levels,
+  percentiles, sums) runs in 64-bit float. For comparison, Adobe Audition and
+  Audacity process audio in 32-bit float.
+- **Proof.** `tests/test_exact.py` computes each measurement a second time as
+  its textbook whole-array definition and requires the same result, with a
+  deliberately awkward chunk size. Per-frame and per-block values,
+  percentiles, histograms and counts are bit-identical; whole-file sums agree
+  to float64 rounding (about 1e-15 relative). The file analysis is tested
+  against the direct functions the same way.
+- **Reference implementations.** Integrated loudness, loudness range and true
+  peak (4x oversampled, ITU-R BS.1770-4) come from ffmpeg's `ebur128` filter,
+  run over the entire decoded file.
+- **Percentiles need every value.** The per-bin percentiles of the spectrum
+  are taken over all analysed frames; for long files those values are
+  written to disk and sorted there, which is why the first analysis of a long
+  file takes minutes rather than seconds. The result is stored next to the
+  decoded audio, so each file is analysed once per version.
 
 ## How the verdict is reached
 
