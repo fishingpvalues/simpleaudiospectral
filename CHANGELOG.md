@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.2](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.1...v0.0.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* MP3 lowpass in a 48 kHz file was reported as a resample ([2128022](https://github.com/fishingpvalues/simpleaudiospectral/commit/2128022d328c8d021ff3bb0cb7fabaf38b687758))
+
 ## 0.0.1 (2026-09-23)
 
 
