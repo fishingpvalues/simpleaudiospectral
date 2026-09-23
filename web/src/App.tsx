@@ -17,7 +17,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react"
-import { api, type Channel, type Info, type Scale } from "@/lib/api"
+import { api, type Channel, type Info, type Progress, type Scale } from "@/lib/api"
 import { COLORMAP_GROUPS } from "@/lib/colormaps"
 import { fmtHz, fmtTime, type View } from "@/lib/scale"
 import { Analysis } from "@/components/Analysis"
@@ -101,6 +101,7 @@ export function App() {
   const [info, setInfo] = useState<Info | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [analysing, setAnalysing] = useState(false)
+  const [progress, setProgress] = useState<Progress | null>(null)
   const [loading, setLoading] = useState(false)
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [view, setViewRaw] = useState<View>({ t0: 0, t1: 1, f0: 0, f1: 22050 })
@@ -201,8 +202,9 @@ export function App() {
     setInfo(null)
     setTranscode(false)
     setViewSpec(null)
+    setProgress(null)
     api
-      .info(path, ctl.signal)
+      .info(path, ctl.signal, setProgress)
       .then(i => {
         setInfo(i)
         viewHistory.current = []
@@ -622,7 +624,7 @@ export function App() {
                   registerExport={registerExport}
                 />
               ) : (
-                <Empty analysing={analysing} error={error} name={name} />
+                <Empty analysing={analysing} error={error} name={name} progress={progress} />
               )}
             </ErrorBoundary>
           </div>
@@ -724,13 +726,40 @@ function Toggle({
   )
 }
 
-function Empty({ analysing, error, name }: { analysing: boolean; error: string | null; name?: string }) {
+function Empty({
+  analysing,
+  error,
+  name,
+  progress,
+}: {
+  analysing: boolean
+  error: string | null
+  name?: string
+  progress: Progress | null
+}) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
       {analysing ? (
         <>
-          <Loader2 className="size-6 animate-spin" />
-          <p className="text-sm">Decoding and analysing {name}...</p>
+          <Loader2 className="size-6 animate-spin" aria-hidden="true" />
+          <p className="text-sm" role="status">
+            {progress ? `${progress.stage}` : "Decoding"} - {name}
+          </p>
+          {progress && progress.done > 0 && (
+            <div
+              className="h-1 w-64 overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(progress.done * 100)}
+            >
+              <div className="h-full bg-foreground/70" style={{ width: `${progress.done * 100}%` }} />
+            </div>
+          )}
+          <p className="max-w-sm text-xs">
+            Every frame of the file is analysed. The first analysis of a long file takes a while; the result is kept, so
+            opening it again is instant.
+          </p>
         </>
       ) : error ? (
         <p className="text-sm text-destructive">{error}</p>

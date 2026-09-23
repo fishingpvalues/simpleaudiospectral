@@ -140,13 +140,42 @@ async function json<T>(url: string, signal?: AbortSignal): Promise<T> {
   return body as T
 }
 
+export interface Progress {
+  stage: string
+  done: number
+}
+
+/** The analysis of a long file runs in the background; the server answers 202
+ * with its stage until the result is ready. */
+async function poll<T>(url: string, signal?: AbortSignal, onProgress?: (p: Progress) => void): Promise<T> {
+  for (;;) {
+    const r = await fetch(url, { signal })
+    const body = await r.json()
+    if (r.status === 202) {
+      onProgress?.(body as Progress)
+      await new Promise<void>((res, rej) => {
+        const t = setTimeout(res, 1000)
+        signal?.addEventListener("abort", () => {
+          clearTimeout(t)
+          rej(new DOMException("aborted", "AbortError"))
+        })
+      })
+      continue
+    }
+    if (!r.ok) throw new Error(body.error ?? r.statusText)
+    return body as T
+  }
+}
+
 export const api = {
   ls: (path: string) => json<Listing>(`/api/ls?${q({ path })}`),
   roots: () => json<{ roots: Root[]; indexed: boolean; entries: number }>("/api/roots"),
   search: (query: string, signal?: AbortSignal) =>
     json<{ ready: boolean; results: SearchHit[] }>(`/api/search?${q({ q: query, limit: 150 })}`, signal),
-  info: (path: string, signal?: AbortSignal) => json<Info>(`/api/info?${q({ path })}`, signal),
-  stats: (path: string, signal?: AbortSignal) => json<Stats>(`/api/stats?${q({ path })}`, signal),
+  info: (path: string, signal?: AbortSignal, onProgress?: (p: Progress) => void) =>
+    poll<Info>(`/api/info?${q({ path })}`, signal, onProgress),
+  stats: (path: string, signal?: AbortSignal, onProgress?: (p: Progress) => void) =>
+    poll<Stats>(`/api/stats?${q({ path })}`, signal, onProgress),
   async stft(p: Record<string, string | number>, signal?: AbortSignal): Promise<Stft> {
     const r = await fetch(`/api/stft?${q(p)}`, { signal })
     if (!r.ok) throw new Error((await r.json()).error ?? r.statusText)
