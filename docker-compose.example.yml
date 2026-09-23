@@ -1,0 +1,24 @@
+services:
+  simpleaudiospectral:
+    build: https://github.com/fishingpvalues/simpleaudiospectral.git#main
+    container_name: simpleaudiospectral
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /cache:size=256m,uid=1000,gid=1000
+      - /tmp:size=64m,mode=1777
+    ports:
+      # No authentication: keep it on loopback and put a reverse proxy,
+      # Tailscale serve or similar in front. Never publish it on 0.0.0.0.
+      - "127.0.0.1:4748:4748"
+    environment:
+      PCM_CACHE_MB: "600"
+    volumes:
+      - /path/to/music:/library/music:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
