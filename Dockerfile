@@ -46,9 +46,14 @@ RUN uv sync --frozen --no-dev --no-install-project \
 RUN mkdir -p /pcm && chown 1000:1000 /pcm
 VOLUME ["/pcm"]
 
-COPY app.py ./
+COPY app.py dsp.py ./
 COPY --from=web /web/dist ./web
 ENV APP_VERSION=${VERSION}
+# glibc keeps freed memory in per-thread arenas; with numpy worker threads that
+# grew the heap until it crowded out the page cache the memory-mapped PCM
+# relies on (and, at FFT 32768, into an OOM). Two arenas and a fixed mmap
+# threshold return large buffers to the kernel as soon as they are freed.
+ENV MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=1048576 MALLOC_TRIM_THRESHOLD_=4194304
 
 EXPOSE 4748
 HEALTHCHECK --interval=60s --timeout=10s --start-period=15s --retries=3 \

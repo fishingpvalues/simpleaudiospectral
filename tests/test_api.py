@@ -61,8 +61,24 @@ def get(base, path, headers=None):
 
 
 def jget(base, path):
-    code, _, body = get(base, path)
-    return code, json.loads(body)
+    """GET JSON, polling while the server answers 202 (analysis running)."""
+    import time
+
+    for _ in range(600):
+        code, _, body = get(base, path)
+        if code != 202:
+            return code, json.loads(body)
+        time.sleep(0.1)
+    raise AssertionError("analysis never finished")
+
+
+def test_info_is_202_then_200(server):
+    code, _, body = get(server, "/api/info?path=Artist/Album/02%20transcode.flac")
+    assert code in (200, 202)
+    if code == 202:
+        assert json.loads(body)["pending"] is True
+    code, d = jget(server, "/api/info?path=Artist/Album/02%20transcode.flac")
+    assert code == 200 and d["analysis"]["level"] == "bad"
 
 
 def test_ls(server):

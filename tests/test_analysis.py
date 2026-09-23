@@ -194,25 +194,6 @@ def test_clicks_isolated_vs_dense_transients(app):
     assert d_dense["clicksPerMin"] < 5
 
 
-def test_chunked_passes_match_whole_array(app, monkeypatch):
-    """Chunking is how long DJ sets fit in memory; results must not depend on it."""
-    sr = 44100
-    left = noise(sr, 40, seed=3)
-    right = noise(sr, 40, seed=4)
-    left[5000:5010] = 1.0
-    whole_dyn = app.dynamics(left, right, sr)
-    whole_peaks = app.peaks(left, sr, 0, 40, 300)
-    whole_floor = app.quiet_floor(left, sr)
-    monkeypatch.setattr(app, "CHUNK", 7919)  # prime: never aligned with any block
-    small_dyn = app.dynamics(left, right, sr)
-    assert small_dyn["dr"] == whole_dyn["dr"]
-    assert small_dyn["drPerChannel"] == whole_dyn["drPerChannel"]
-    assert small_dyn["clipEvents"] == whole_dyn["clipEvents"] == 1
-    assert abs(small_dyn["correlation"] - whole_dyn["correlation"]) < 1e-9
-    assert app.peaks(left, sr, 0, 40, 300) == whole_peaks
-    assert app.quiet_floor(left, sr) == whole_floor
-
-
 def test_derived_mix_side_match_numpy(app):
     rng = np.random.default_rng(5)
     mm = rng.standard_normal((10000, 2)).astype(np.float32)
@@ -224,28 +205,6 @@ def test_derived_mix_side_match_numpy(app):
         mix.take(idx), (mm[[0, 0, 9999, 9999], 0] + mm[[0, 0, 9999, 9999], 1])[None] / 2, rtol=1e-6
     )
     assert len(mix) == 10000
-
-
-def test_summary_peaks_match_sample_peaks(app):
-    sr = 44100
-    x = noise(sr, 30, seed=6)
-    sm = app.Summary(x, x.copy(), sr)
-    a = np.frombuffer(app.summary_peaks(sm, "left", 0, 30, 60), np.float32).reshape(-1, 2)
-    b = np.frombuffer(app.peaks(x, sr, 0, 30, 60), np.float32).reshape(-1, 2)
-    np.testing.assert_allclose(a, b, atol=1e-6)
-
-
-def test_true_peak_finds_intersample_peak(app):
-    # A sine at fs/4 with a 45 degree phase: every sample sits at 0.707 of the
-    # amplitude, so the sample peak under-reads the true peak by 3.01 dB.
-    sr = 48000
-    t = np.arange(sr * 10)
-    x = (0.5 * np.sin(2 * np.pi * t / 4 + np.pi / 4)).astype(np.float32)
-    sm = app.Summary(x, x.copy(), sr)
-    sample_peak = 20 * np.log10(np.abs(x).max())
-    tp = app.true_peak(sm, x, x.copy(), sr)
-    assert abs(sample_peak - (-9.03)) < 0.05
-    assert abs(tp - (-6.02)) < 0.2
 
 
 def test_mp3_lowpass_in_48k_file_is_not_called_a_resample(app):

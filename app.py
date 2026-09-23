@@ -29,6 +29,7 @@ import collections
 import gzip
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import re
@@ -40,6 +41,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
+
+import dsp
 
 ROOT = os.path.realpath(os.environ.get("LIBRARY_ROOT", "/library"))
 CACHE = os.environ.get("CACHE_DIR", "/cache")
@@ -198,6 +201,7 @@ class PcmCache:
     def _decode(self, path, key):
         if self.dir is None:
             self.dir = _pcm_dir()
+            dsp.SPILL_DIR = self.dir  # large per-bin matrices spill next to the PCM
         p = run(
             [
                 "ffprobe",
@@ -311,25 +315,13 @@ def window(name, n):
 def stft_view(x, sr, t0, t1, cols, rows, f0, f1, fft, win, scale):
     """Spectrogram of exactly the viewport, at exactly the display size.
 
-    Each column is the mean power of up to 4 FFT frames spread across its time
-    slot, so a zoomed-out view is an average rather than a random sample. Each
-    row is the MAX over the FFT bins it covers - a thin lowpass edge or a
-    single tone must never be pooled away at a small display height.
+    Each column is the mean power of EVERY FFT frame (hop fft/2) centred in
+    its time slot (dsp.stft_columns). Each row is the MAX over the FFT bins
+    it covers, so a thin lowpass edge or a single tone is never pooled away
+    at a small display height.
     """
-    n = len(x)
-    w = window(win, fft)
+    w = window(win, fft).astype(np.float64)
     norm = (w.sum() / 2) ** 2  # a full-scale sine reads 0 dBFS
-    span = (t1 - t0) * sr
-    hop = span / cols
-    sub = int(min(4, max(1, hop // fft)))
-    # A full view of a long set would read cols x 4 x fft samples; past ~64 M
-    # samples one frame per column is enough, the view is averaging anyway.
-    while sub > 1 and cols * sub * fft > 64_000_000:
-        sub -= 1
-    centers = t0 * sr + (np.arange(cols) + 0.5) * hop
-    offs = (np.arange(sub) - (sub - 1) / 2) * (hop / sub)
-    starts = (centers[:, None] + offs[None, :] - fft / 2).astype(np.int64).ravel()
-
     nb = fft // 2 + 1
     bin_hz = sr / fft
     nyq = sr / 2
@@ -339,22 +331,9 @@ def stft_view(x, sr, t0, t1, cols, rows, f0, f1, fft, win, scale):
     starts_b = np.clip(np.floor(edges[:-1] / bin_hz).astype(np.int64), 0, nb - 1)
     end_b = int(min(nb, np.ceil(f1 / bin_hz) + 1))
     starts_b = np.minimum(starts_b, end_b - 1)
-
-    # Columns are processed in groups and pooled to display rows at once, so
-    # memory is bounded by the group (~64 MB of frames), never by
-    # cols x frames x bins - at FFT 32768 that product is over 1 GB.
-    pooled = np.empty((cols, rows), dtype=np.float32)
-    ar = np.arange(fft, dtype=np.int64)
-    per = max(1, (64 * 1024 * 1024) // (fft * 16 * sub))
-    for c0 in range(0, cols, per):
-        c1 = min(cols, c0 + per)
-        idx = starts[c0 * sub : c1 * sub, None] + ar[None, :]
-        frames = np.asarray(x.take(idx, mode="clip"), dtype=np.float32)
-        frames[(idx < 0) | (idx >= n)] = 0.0
-        spec = np.fft.rfft(frames * w, axis=1)
-        power = (spec.real**2 + spec.imag**2).reshape(c1 - c0, sub, nb).mean(axis=1)
-        pooled[c0:c1] = np.maximum.reduceat(power[:, :end_b], starts_b, axis=1)
-
+    pooled = dsp.stft_columns(
+        x, sr, t0, t1, cols, fft, w, reduce=lambda p: np.maximum.reduceat(p[:, :end_b], starts_b, axis=1)
+    )
     db = 10 * np.log10(pooled / norm + 1e-30)
     q = np.clip((db - DB_FLOOR) * (255.0 / -DB_FLOOR), 0, 255).astype(np.uint8)
     img = np.ascontiguousarray(q.T[::-1])  # rows x cols, top row = f1
@@ -371,23 +350,9 @@ def stft_view(x, sr, t0, t1, cols, rows, f0, f1, fft, win, scale):
         "dbFloor": DB_FLOOR,
         "dbCeil": 0.0,
         "binHz": bin_hz,
-        "framesPerCol": sub,
+        "framesPerCol": "all",
     }
     return img.tobytes(), meta
-
-
-def summary_peaks(sm, ch, t0, t1, cols):
-    """Coarse waveform from the Summary's per-block min/max: a full view of a
-    3 h set in milliseconds instead of a pass over the whole file."""
-    b0 = max(0, int(t0 / SUMMARY_BLOCK))
-    b1 = min(sm.nb, max(b0 + 1, int(np.ceil(t1 / SUMMARY_BLOCK))))
-    out = np.zeros((cols, 2), dtype=np.float32)
-    if b1 <= b0:
-        return out.tobytes()
-    st = np.clip(np.linspace(b0, b1, cols + 1).astype(np.int64)[:-1] - b0, 0, b1 - b0 - 1)
-    out[:, 0] = np.minimum.reduceat(sm.mn[ch][b0:b1], st)
-    out[:, 1] = np.maximum.reduceat(sm.mx[ch][b0:b1], st)
-    return out.tobytes()
 
 
 def peaks(x, sr, t0, t1, cols):
@@ -483,28 +448,31 @@ def analyse(path):
     return analyse_pcm(x, side, sr, summary=summary_for(path))
 
 
-def analyse_pcm(x, side, sr, summary=None, levels=True):
-    """analyse() on decoded samples: mono mix, side channel, sample rate."""
-    n = 8192
-    if len(x) < n * 4:
-        return None
-    hops = np.linspace(0, len(x) - n, num=min(600, len(x) // n)).astype(int)
-    frames = np.stack([x[h : h + n] for h in hops])
-    rms = np.sqrt((frames**2).mean(axis=1))
-    loud = frames[rms > max(1e-4, np.percentile(rms, 30))]
-    if len(loud) < 4:
-        loud = frames
-    win = np.hanning(n).astype(np.float32)
-    spec = np.fft.rfft(loud * win, axis=1)
-    db = 10 * np.log10((spec.real**2 + spec.imag**2) / (win.sum() / 2) ** 2 + 1e-30)
+def whole_levels(x, side, sr):
+    """Exact totals when no Summary exists: mean square of x and side over the
+    whole file, and 0.5 s block energies of x for the loudest window."""
+    ssx, sss = [], []
+    for c0 in range(0, len(x), dsp.CHUNK):
+        ssx.append(float((dsp.f64(x[c0 : c0 + dsp.CHUNK]) ** 2).sum()))
+        sss.append(float((dsp.f64(side[c0 : c0 + dsp.CHUNK]) ** 2).sum()))
+    b05, _ = block_sums(x, int(sr * 0.5))
+    return math.fsum(ssx) / max(1, len(x)), math.fsum(sss) / max(1, len(x)), b05
+
+
+SPEC_N = 8192  # lowpass analysis frame (hop SPEC_N/2)
+HF_N = 2048  # sfb21 frame: under two MP3 granules (hop HF_N/2)
+
+
+def lowpass(p90_raw, med_raw, sr, n=SPEC_N):
+    """Cut-off, drop, 16 kHz shelf, hi-res and extent from the exact per-bin
+    90th percentile and median of the dB spectrum."""
     freqs = np.fft.rfftfreq(n, 1 / sr)
     bin_hz = freqs[1]
     nyq = sr / 2
     k = max(1, int(100 / bin_hz))
     kern = np.ones(k) / k
-    p90_raw = np.percentile(db, 90, axis=0)
     p90 = np.convolve(p90_raw, kern, mode="same")
-    med = np.convolve(np.median(db, axis=0), kern, mode="same")
+    med = np.convolve(med_raw, kern, mode="same") if med_raw is not None else None
     ref = float(np.median(p90[(freqs > 1000) & (freqs < 8000)]))
     span = max(2, int(500 / bin_hz))
 
@@ -521,8 +489,10 @@ def analyse_pcm(x, side, sr, summary=None, levels=True):
 
     # Shelf: a step of >= 10 dB at 16 kHz in the median, above a lowpass that
     # itself sits well above 16 kHz (at 128k the wall IS at 16 kHz).
-    sdrop, si, _, _ = _step(med, int(15300 / bin_hz), int(16700 / bin_hz), max(2, int(400 / bin_hz)))
-    shelf16 = si is not None and sdrop >= 10 and (cutoff_hz is None or cutoff_hz > 17500)
+    sdrop, shelf16 = 0.0, False
+    if med is not None:
+        sdrop, si, _, _ = _step(med, int(15300 / bin_hz), int(16700 / bin_hz), max(2, int(400 / bin_hz)))
+        shelf16 = si is not None and sdrop >= 10 and (cutoff_hz is None or cutoff_hz > 17500)
 
     hires_db = None
     if sr > 48000:
@@ -536,41 +506,43 @@ def analyse_pcm(x, side, sr, summary=None, levels=True):
     above70 = np.where(p90 > ref - 80)[0]
     extent_hz = float(freqs[above70[-1]]) if len(above70) else 0.0
 
-    # Whole-track levels: from the Summary when there is one, skipped when the
-    # caller only wants a cut-off (per-channel comparison).
-    if summary is not None:
-        k5 = round(0.5 / SUMMARY_BLOCK)
-        mid_ss, side_ss = summary.group(summary.ss["mix"], k5), summary.group(summary.ss["side"], k5)
-    elif levels:
-        mid_ss, _ = block_sums(x, int(sr * 0.5))
-        side_ss, _ = block_sums(side, int(sr * 0.5))
-    else:
-        mid_ss = side_ss = np.zeros(0)
-    mid_rms = float(np.sqrt(mid_ss.sum() / max(1, len(mid_ss)))) + 1e-12
-    side_rms = float(np.sqrt(side_ss.sum() / max(1, len(side_ss)))) + 1e-12
-    side_db = 20 * np.log10(side_rms / mid_rms) if len(mid_ss) else None
+    # CRT / TV line whine (15.625 kHz PAL, 15.734 kHz NTSC): a narrow tone that
+    # reads like an artifact on a spectral and is not one.
+    crt = None
+    for tone in (15625, 15734):
+        t = round(tone / bin_hz)
+        if t + 40 < len(p90_raw):
+            around = np.median(np.r_[p90_raw[t - 40 : t - 4], p90_raw[t + 4 : t + 40]])
+            if p90_raw[t - 2 : t + 3].max() - around > 15:
+                crt = tone
+    return {
+        "freqs": freqs,
+        "k": k,
+        "p90": p90,
+        "med": med,
+        "ref": ref,
+        "cutoff_hz": cutoff_hz,
+        "drop": drop,
+        "sdrop": sdrop,
+        "shelf16": shelf16,
+        "hires_db": hires_db,
+        "extent_hz": extent_hz,
+        "crt": crt,
+        "nyq": nyq,
+    }
 
-    # sfb21 variability: LAME codes the band above 16 kHz only when bits are
-    # left, so its level jumps frame to frame (std 13-23 dB measured), while
-    # AAC, Opus, Vorbis and lossless keep it steady (3.7-6.4 dB).
-    # Frames must be SHORT (2048 = under two MP3 granules): an 8192 frame
-    # averages ~7 granules and hides exactly the variance being measured.
-    hf_sd = None
+
+def hf_band_top(cutoff_hz, nyq):
+    """Upper edge of the sfb21 band, or None when there is no band to measure."""
     top_hz = min(cutoff_hz or nyq, 19000) - 300
-    if top_hz > 16800:
-        ns = 2048
-        sh = np.linspace(0, len(x) - ns, num=min(1500, len(x) // ns)).astype(int)
-        sf = np.stack([x[h : h + ns] for h in sh])
-        srms = np.sqrt((sf**2).mean(axis=1))
-        sf = sf[srms > max(1e-4, np.percentile(srms, 30))]
-        sw = np.hanning(ns).astype(np.float32)
-        sp = np.fft.rfft(sf * sw, axis=1)
-        p_lin = sp.real**2 + sp.imag**2
-        fs_ = np.fft.rfftfreq(ns, 1 / sr)
-        m_hi = (fs_ > 16200) & (fs_ < top_hz)
-        m_lo = (fs_ > 12000) & (fs_ < 15800)
-        r = 10 * np.log10(p_lin[:, m_hi].sum(1) / (p_lin[:, m_lo].sum(1) + 1e-30) + 1e-12)
-        hf_sd = round(float(r.std()), 1)
+    return top_hz if top_hz > 16800 else None
+
+
+def analysis_result(lp, sr, n_samples, hf_sd, side_db, b05, used):
+    """The analysis dict from exact measurements (see analyse_pcm)."""
+    cutoff_hz, drop, nyq = lp["cutoff_hz"], lp["drop"], lp["nyq"]
+    if hf_sd is not None:
+        hf_sd = round(hf_sd, 1)
 
     # Resampled from a lower rate: a wall just under a standard Nyquist.
     # A resampler's anti-alias filter sits within ~5% of the source Nyquist.
@@ -583,51 +555,74 @@ def analyse_pcm(x, side, sr, summary=None, levels=True):
             if src_sr / 2 < nyq - 1000 and 0.94 * src_sr / 2 <= cutoff_hz <= src_sr / 2 + 100:
                 resampled_from = src_sr
 
-    # CRT / TV line whine (15.625 kHz PAL, 15.734 kHz NTSC): a narrow tone that
-    # reads like an artifact on a spectral and is not one.
-    crt = None
-    for tone in (15625, 15734):
-        b = round(tone / bin_hz)
-        if b + 40 < len(p90_raw):
-            around = np.median(np.r_[p90_raw[b - 40 : b - 4], p90_raw[b + 4 : b + 40]])
-            if p90_raw[b - 2 : b + 3].max() - around > 15:
-                crt = tone
-
     # Loudest 8 s: where a zoomed spectral is most informative.
-    win_s = min(8.0, len(x) / sr)
+    win_s = min(8.0, n_samples / sr)
     loudest = 0.0
-    if len(mid_ss) > 2:
+    if len(b05) > 2:
         w = max(1, int(win_s * 2))
-        c = np.convolve(mid_ss, np.ones(w), mode="valid")
+        c = np.convolve(b05, np.ones(w), mode="valid")
         loudest = float(np.argmax(c) * 0.5)
 
     family = codec_family(cutoff_hz, hf_sd, drop)
-    verdict, level = verdict_for(cutoff_hz, drop, extent_hz, nyq, sr, hires_db, family, resampled_from)
-    step = max(1, int(25 / bin_hz))
+    verdict, level = verdict_for(
+        cutoff_hz, drop, lp["extent_hz"], nyq, sr, lp["hires_db"], family, resampled_from
+    )
+    freqs, k = lp["freqs"], lp["k"]
+    step = max(1, int(25 / freqs[1]))
     keep = slice(0, len(freqs) - k, step)  # "same" convolution smears the last k bins
     return {
         "cutoffHz": cutoff_hz,
         "dropDb": round(drop, 1),
-        "extentHz": round(extent_hz),
+        "extentHz": round(lp["extent_hz"]),
         "nyquistHz": nyq,
-        "shelf16k": bool(shelf16),
-        "shelfDropDb": round(sdrop, 1),
-        "hiresDb": hires_db,
+        "shelf16k": bool(lp["shelf16"]),
+        "shelfDropDb": round(lp["sdrop"], 1),
+        "hiresDb": lp["hires_db"],
         "sideDb": round(side_db, 1) if side_db is not None else None,
         "hfSd": hf_sd,
         "family": family,
         "resampledFrom": resampled_from,
-        "crtTone": crt,
+        "crtTone": lp["crt"],
         "loudestAt": loudest,
         "verdict": verdict,
         "level": level,
-        "refDb": round(ref, 1),
+        "refDb": round(lp["ref"], 1),
+        "framesAnalysed": used,
         "curve": {
             "hz": [round(float(f)) for f in freqs[keep]],
-            "db": [round(float(v), 1) for v in p90[keep]],
-            "median": [round(float(v), 1) for v in med[keep]],
+            "db": [round(float(v), 1) for v in lp["p90"][keep]],
+            "median": [round(float(v), 1) for v in lp["med"][keep]] if lp["med"] is not None else [],
         },
     }
+
+
+def analyse_pcm(x, side, sr, summary=None, levels=True):
+    """Lowpass, codec and level analysis of the WHOLE signal.
+
+    Every loud 8192-sample frame (hop 4096) enters the per-bin 90th percentile
+    (the lowpass) and median (the 16 kHz shelf); every loud 2048-sample frame
+    (hop 1024) enters the sfb21 variability. See dsp.py for the definitions.
+    The file analysis (run_analysis) computes the same quantities in shared
+    sequential passes; this is the direct form used for arrays and tests.
+    """
+    if len(x) < SPEC_N * 4:
+        return None
+    (med_raw, p90_raw), used = dsp.spectrum_percentiles(x, sr, n=SPEC_N, hop=SPEC_N // 2, qs=(50, 90))
+    lp = lowpass(p90_raw, med_raw, sr)
+    side_db, b05 = None, np.zeros(0)
+    if summary is not None:
+        ms_x = summary.total_ss["mix"] / max(1, summary.n)
+        ms_s = summary.total_ss["side"] / max(1, summary.n)
+        b05 = summary.ss["b05"]["mix"]
+        side_db = 20 * np.log10((math.sqrt(ms_s) + 1e-12) / (math.sqrt(ms_x) + 1e-12))
+    elif levels:
+        ms_x, ms_s, b05 = whole_levels(x, side, sr)
+        side_db = 20 * np.log10((math.sqrt(ms_s) + 1e-12) / (math.sqrt(ms_x) + 1e-12))
+    hf_sd = None
+    top_hz = hf_band_top(lp["cutoff_hz"], lp["nyq"])
+    if top_hz:
+        hf_sd = dsp.band_ratio_std(x, sr, (12000, 15800), (16200, top_hz), n=HF_N, hop=HF_N // 2)
+    return analysis_result(lp, sr, len(x), hf_sd, side_db, b05, used)
 
 
 def codec_family(cutoff_hz, hf_sd, drop):
@@ -713,38 +708,6 @@ def _num(text, pattern):
     return None if v in ("-inf", "inf", "nan") else float(v)
 
 
-def true_peak(sm, left, right, sr, blocks=96):
-    """True peak (dBTP) per ITU-R BS.1770-4 Annex 2: oversample 4x (2x at
-    88.2/96 kHz, none above), take the absolute maximum.
-
-    Only the loudest summary blocks are oversampled - an inter-sample peak
-    sits next to a large sample peak, so the global maximum is among them.
-    That turns a 28 s pass over a 3 h set (ffmpeg peak=true) into well under
-    a second.
-    """
-    over = 4 if sr <= 48000 else 2 if sr <= 96000 else 1
-    taps = 48
-    k = np.arange(-taps * over, taps * over + 1)
-    h = np.sinc(k / over) * np.kaiser(len(k), 8.0)
-    best = 0.0
-    for ch, x in (("left", left), ("right", right)) if sm.stereo else (("left", left),):
-        am = sm.absmax(ch)
-        if not len(am):
-            continue
-        for b in np.argsort(am)[-blocks:]:
-            a0 = max(0, b * sm.bs - taps)
-            a1 = min(sm.n, (b + 1) * sm.bs + taps)
-            seg = np.asarray(x[a0:a1], dtype=np.float64)
-            if over == 1:
-                best = max(best, float(np.abs(seg).max(initial=0)))
-                continue
-            up = np.zeros(len(seg) * over)
-            up[::over] = seg
-            y = np.convolve(up, h, mode="same")
-            best = max(best, float(np.abs(y).max(initial=0)))
-    return round(20 * np.log10(best), 1) if best > 0 else None
-
-
 def loudness(path, raw=None):
     """raw = (pcm_file, sr, channels): read the decoded PCM instead of
     decoding the source again (a 3 h MP3 decode is half a minute)."""
@@ -761,7 +724,7 @@ def loudness(path, raw=None):
             "-nostats",
             *src,
             "-af",
-            "ebur128=framelog=verbose,astats=measure_perchannel=none:measure_overall="
+            "ebur128=peak=true:framelog=verbose,astats=measure_perchannel=none:measure_overall="
             "Peak_level+RMS_level+DC_offset+Flat_factor+Peak_count+Noise_floor+Bit_depth",
             "-f",
             "null",
@@ -804,100 +767,6 @@ def loudness(path, raw=None):
     }
 
 
-def _runs(hot, offset, sr, times):
-    d = np.diff(np.concatenate([[0], hot.astype(np.int8), [0]]))
-    st, en = np.where(d == 1)[0], np.where(d == -1)[0]
-    runs = st[(en - st) >= 3]
-    if len(times) < 500:
-        times.extend(((runs + offset) / sr).tolist())
-    return len(runs)
-
-
-def _isolated_clicks(seg, sr):
-    """Isolated spikes in the 2nd difference. A vinyl click is a few samples
-    wide and stands far above its neighbourhood; a drum hit or a dense passage
-    raises the whole neighbourhood with it, so a candidate must beat the max
-    of the surrounding +-1.5 ms by 4x."""
-    d2 = np.abs(np.diff(seg, 2))
-    mad = np.median(d2) + 1e-12
-    cand = np.where(d2 > 40 * mad)[0]
-    if len(cand) > 5000:
-        cand = np.sort(cand[np.argsort(d2[cand])[-5000:]])
-    half, excl = max(8, int(sr * 0.0015)), 4
-    iso = []
-    for i in cand:
-        a, b = max(0, i - half), min(len(d2), i + half)
-        around = max(d2[a : max(a, i - excl)].max(initial=0), d2[min(b, i + excl) : b].max(initial=0))
-        if d2[i] > 4 * around:
-            iso.append(i)
-    if not iso:
-        return 0
-    iso = np.array(iso)
-    return int((np.r_[True, np.diff(iso) > sr // 200]).sum())
-
-
-SUMMARY_BLOCK = 0.1  # seconds
-
-
-class Summary:
-    """Per-0.1 s block statistics of a whole track, from ONE chunked pass.
-
-    Everything length-proportional (DR, RMS, correlation, quiet floor, the
-    loudest window, clip runs, coarse waveform views) reads these arrays
-    instead of the samples. Measured on a 3 h set: ten passes over a 4.2 GB
-    memmap took 168 s; one pass is what is left.
-    """
-
-    def __init__(self, left, right, sr):
-        self.sr = sr
-        self.bs = bs = max(1, int(sr * SUMMARY_BLOCK))
-        self.stereo = right is not left
-        n = len(left)
-        self.n = n
-        nb = n // bs
-        self.nb = nb
-        z = lambda: np.zeros(nb)
-        self.ss = {k: z() for k in ("left", "right", "mix", "side")}
-        self.mn = {k: z() for k in ("left", "right", "mix", "side")}
-        self.mx = {k: z() for k in ("left", "right", "mix", "side")}
-        self.lr = z()
-        self.clip_runs = 0
-        self.clip_times = []
-        self.identical = True
-        per = max(1, CHUNK // bs)
-        for b0 in range(0, nb, per):
-            b1 = min(nb, b0 + per)
-            a, b = b0 * bs, b1 * bs
-            L = np.asarray(left[a:b], dtype=np.float64)
-            R = np.asarray(right[a:b], dtype=np.float64) if self.stereo else L
-            sig = {"left": L, "right": R, "mix": (L + R) * 0.5, "side": (L - R) * 0.5}
-            for k, v in sig.items():
-                blk = v.reshape(b1 - b0, bs)
-                self.ss[k][b0:b1] = (blk * blk).sum(1)
-                self.mn[k][b0:b1] = blk.min(1)
-                self.mx[k][b0:b1] = blk.max(1)
-            self.lr[b0:b1] = (L * R).reshape(b1 - b0, bs).sum(1)
-            if self.stereo and self.identical:
-                self.identical = bool(np.array_equal(L, R))
-            for v in (L, R) if self.stereo else (L,):
-                self.clip_runs += _runs(np.abs(v) >= 0.99997, a, sr, self.clip_times)
-        self.peak = max(
-            float(np.max(np.abs(self.mn["left"]), initial=0)),
-            float(np.max(self.mx["left"], initial=0)),
-            float(np.max(np.abs(self.mn["right"]), initial=0)),
-            float(np.max(self.mx["right"], initial=0)),
-        )
-
-    def group(self, arr, k, how="sum"):
-        """Fold blocks into groups of k (e.g. 30 blocks = 3 s)."""
-        m = len(arr) // k
-        g = arr[: m * k].reshape(m, k)
-        return {"sum": g.sum, "max": g.max, "min": g.min}[how](1)
-
-    def absmax(self, ch):
-        return np.maximum(np.abs(self.mn[ch]), np.abs(self.mx[ch]))
-
-
 SUMMARIES = collections.OrderedDict()
 SUMMARY_LOCK = threading.Lock()
 
@@ -908,10 +777,10 @@ def summary_for(path):
         if key in SUMMARIES:
             SUMMARIES.move_to_end(key)
             return SUMMARIES[key]
-    left, sr = PCM.get(path, "left")
+    mm, sr = PCM.open(path)
+    left, _ = PCM.get(path, "left")
     right, _ = PCM.get(path, "right")
-    mm, _ = PCM.open(path)
-    sm = Summary(left, right if mm.shape[1] > 1 else left, sr)
+    sm = dsp.summarize(left, right if mm.shape[1] > 1 else left, sr)
     with SUMMARY_LOCK:
         SUMMARIES[key] = sm
         while len(SUMMARIES) > 16:
@@ -919,28 +788,28 @@ def summary_for(path):
     return sm
 
 
-def dynamics(left, right, sr, summary=None):
-    """DR meter (TT/foobar 'DR14' algorithm) and stereo statistics.
+def dynamics(left, right, sr, summary=None, mix=None, welch=None, clicks=None, flat=None):
+    """DR meter (TT/foobar 'DR14' algorithm) and stereo statistics over the
+    whole file.
 
-    DR per channel: 3 s blocks; block RMS = sqrt(2 * mean(x^2)); block peak.
-    DR = 20*log10( 2nd-highest block peak / sqrt(mean of the loudest 20% of
-    block RMS^2) ). The reported value is the channel mean, rounded. Block
-    statistics come from the one-pass Summary, so length does not matter.
+    DR per channel: every full 3 s block; block RMS = sqrt(2 * mean(x^2));
+    block peak = max |x|. DR = 20*log10(2nd-highest block peak / sqrt(mean of
+    the loudest 20% of block RMS^2)); the reported value is the channel mean,
+    rounded.
     """
-    sm = summary or Summary(left, right, sr)
+    sm = summary or dsp.summarize(left, right, sr)
     stereo = sm.stereo
-    n = sm.n
-    k3 = round(3 / SUMMARY_BLOCK)
-    nb = sm.nb // k3
+    if mix is None and (welch is None or clicks is None):
+        mix = Derived(np.stack([np.asarray(left), np.asarray(right)], axis=1), "mix") if stereo else left
+    B = sm.sizes["b3"]
+    nb = len(sm.ss["b3"]["left"])
     if nb < 1:
         return None
     out = {}
     drs = []
     for ch in ("left", "right") if stereo else ("left",):
-        ss = sm.group(sm.ss[ch], k3)
-        pk = sm.group(sm.absmax(ch), k3, "max")
-        rms = np.sqrt(2 * ss / (k3 * sm.bs))
-        pks = np.sort(pk)
+        rms = np.sqrt(2 * sm.ss["b3"][ch] / B)
+        pks = np.sort(sm.pk["b3"][ch])
         pk2 = pks[-2] if nb >= 2 else pks[-1]
         top = np.sort(rms)[-max(1, round(nb * 0.2)) :]
         r = np.sqrt(np.mean(top**2))
@@ -948,60 +817,43 @@ def dynamics(left, right, sr, summary=None):
     out["dr"] = round(float(np.mean(drs)))
     out["drPerChannel"] = [round(float(d), 1) for d in drs]
 
-    # Clipping: runs of >= 3 consecutive samples at digital full scale, from
-    # the Summary pass. "Flat tops" - the same runs at the file's own peak when
-    # that peak is below full scale (clipped, then normalised down) - need the
-    # peak first, so they cost a second pass, and only when the peak is < FS.
-    times = list(sm.clip_times)
-    flat = 0
-    if 0 < sm.peak < 0.99997:
-        level = np.float32(sm.peak)
+    # Clipping: runs of >= 3 consecutive samples at digital full scale, and
+    # "flat tops": the same runs at the file's own peak when that peak is
+    # below full scale (clipped, then normalised down). Runs are counted across
+    # chunk boundaries, so the counts are exact.
+    flat_n, flat_times = 0, []
+    if flat is not None:
+        flat_n, flat_times = flat
+    elif 0 < sm.peak < 0.99997:
         for x in (left, right) if stereo else (left,):
-            for c0, c1 in chunks(n):
-                flat += _runs(np.abs(np.asarray(x[c0:c1], dtype=np.float32)) == level, c0, sr, times)
+            c, t = dsp.count_runs(x, sm.peak, sr, exact_equal=True)
+            flat_n += c
+            flat_times += t
+    times = sorted(sm.clip_times + flat_times)
     out["clipEvents"] = sm.clip_runs
-    out["flatTopEvents"] = flat
-    out["clipTimes"] = [round(t, 3) for t in sorted({round(t, 2) for t in times})[:500]]
+    out["flatTopEvents"] = flat_n
+    out["clipTimesTotal"] = len(times)
+    out["clipTimes"] = [round(t, 3) for t in times[:500]]  # list for the UI; counts above are complete
 
-    def mix_slice(a, b):
-        seg_l = np.asarray(left[a:b], dtype=np.float64)
-        return (seg_l + np.asarray(right[a:b], dtype=np.float64)) * 0.5 if stereo else seg_l
-
-    # Vinyl / analogue-chain hints from sampled windows. Neither proves
-    # anything alone.
+    # Vinyl / analogue-chain hints over the whole file.
     fr = 1 << 16
-    if n > fr * 2:
-        hops = np.linspace(0, n - fr, 24).astype(int)
-        w = np.hanning(fr)
-        P = np.mean([np.abs(np.fft.rfft(mix_slice(h, h + fr) * w)) ** 2 for h in hops], axis=0)
+    P = welch if welch is not None else dsp.mean_power_spectrum(mix, fr, fr // 2)
+    if P is not None:
         f = np.fft.rfftfreq(fr, 1 / sr)
         sub = P[(f >= 5) & (f < 20)].mean()
         body = P[(f >= 40) & (f < 400)].mean()
         out["rumbleDb"] = round(float(10 * np.log10(sub / (body + 1e-30) + 1e-30)), 1)
     else:
         out["rumbleDb"] = None
-
-    # Clicks in up to 10 windows of 60 s spread over the track.
-    win = min(n, 60 * sr)
-    starts = np.linspace(0, n - win, max(1, min(10, n // max(1, win)))).astype(int)
-    events = sum(_isolated_clicks(mix_slice(s0, s0 + win), sr) for s0 in starts)
-    seconds = len(starts) * win / sr
-    out["clicksPerMin"] = round(events / (seconds / 60), 1) if seconds else 0.0
+    out["clicksPerMin"] = clicks if clicks is not None else dsp.isolated_clicks(mix, sr)
 
     if stereo:
-        ll, rr, lr = sm.ss["left"].sum(), sm.ss["right"].sum(), sm.lr.sum()
-        den = np.sqrt(ll * rr)
-        out["correlation"] = round(float(lr / den), 3) if den > 0 else 1.0
-        k1 = round(1 / SUMMARY_BLOCK)
-        num = sm.group(sm.lr, k1)
-        d = np.sqrt(sm.group(sm.ss["left"], k1) * sm.group(sm.ss["right"], k1))
-        per_sec = np.where(d > 0, num / np.maximum(d, 1e-30), 1.0)
-        # A long set is folded to at most 2000 points, keeping each bucket's
-        # minimum so a short phase dip survives.
-        step = max(1, len(per_sec) // 2000)
-        out["correlationSeries"] = [
-            round(float(per_sec[i : i + step].min()), 3) for i in range(0, len(per_sec), step)
-        ]
+        den = math.sqrt(sm.total_ss["left"] * sm.total_ss["right"])
+        out["correlation"] = round(sm.total_lr / den, 3) if den > 0 else 1.0
+        # Every full second of the track; nothing folded.
+        d = np.sqrt(sm.ss["b1"]["left"] * sm.ss["b1"]["right"])
+        per_sec = np.where(d > 0, sm.lr["b1"] / np.maximum(d, 1e-300), 1.0)
+        out["correlationSeries"] = [round(float(v), 3) for v in per_sec]
         out["identicalChannels"] = sm.identical
     else:
         out["correlation"] = None
@@ -1010,56 +862,59 @@ def dynamics(left, right, sr, summary=None):
 
 
 def bit_usage(path, declared):
-    """Per-bit 'ones' fraction of the integer samples, LSB first.
+    """Per-bit 'ones' fraction over EVERY integer sample of the file, LSB first.
 
     Real 24-bit audio sits near 0.5 on every bit; a 16-bit master padded to 24
     leaves the low 8 bits at exactly 0. A dithered 16->24 conversion fills
-    them with noise, so the quiet-passage noise floor is the second check:
-    16-bit masters bottom out near -96 dBFS, real 24-bit ones well below.
+    them with noise, so the quiet-passage noise floor is the second check.
     """
     bits = declared if declared in (16, 20, 24, 32) else 24
-    p = run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-i",
-            path,
-            "-map",
-            "0:a:0",
-            "-t",
-            "300",
-            "-f",
-            "s32le",
-            "-acodec",
-            "pcm_s32le",
-            "-",
-        ]
+    proc = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0", "-f", "s32le", "-acodec", "pcm_s32le", "-"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
-    v = np.frombuffer(p.stdout, dtype=np.int32)
-    if not len(v):
+    ones = np.zeros(bits, dtype=np.int64)
+    total = 0
+    rest = b""
+    try:
+        while True:
+            buf = proc.stdout.read(1 << 24)
+            if not buf:
+                break
+            buf = rest + buf
+            cut_at = len(buf) - len(buf) % 4
+            rest = buf[cut_at:]
+            v = np.frombuffer(buf[:cut_at], dtype=np.int32)
+            u = (v >> (32 - bits)).astype(np.int64) & ((1 << bits) - 1)
+            for i in range(bits):
+                ones[i] += int(np.count_nonzero((u >> i) & 1))
+            total += len(v)
+    finally:
+        proc.stdout.close()
+        proc.wait(timeout=TIMEOUT)
+    if not total:
         return None
-    v = v[:: max(1, len(v) // 4_000_000)]
-    shifted = (v >> (32 - bits)).astype(np.int64) & ((1 << bits) - 1)
-    ones = [round(float(((shifted >> i) & 1).mean()), 4) for i in range(bits)]
     zero_low = 0
     for o in ones:
-        if o != 0:
+        if o:
             break
         zero_low += 1
-    return {"bits": bits, "ones": ones, "unusedLowBits": zero_low}
+    return {
+        "bits": bits,
+        "ones": [round(int(o) / total, 6) for o in ones],
+        "unusedLowBits": zero_low,
+        "samples": total,
+    }
 
 
 def quiet_floor(x, sr, summary=None):
-    """Noise floor in the quietest non-silent 400 ms blocks (5th percentile)."""
+    """Noise floor: 5th percentile of the RMS of every full 400 ms block that
+    is not digital silence."""
     if summary is not None:
-        k4 = round(0.4 / SUMMARY_BLOCK)
-        ss = summary.group(summary.ss["mix"], k4)
-        blk = k4 * summary.bs
+        ss, blk = summary.ss["b04"]["mix"], summary.sizes["b04"]
     else:
         blk = int(0.4 * sr)
-        if len(x) // blk < 4:
-            return None
         ss, _ = block_sums(x, blk)
     if len(ss) < 4:
         return None
@@ -1071,44 +926,24 @@ def quiet_floor(x, sr, summary=None):
 
 
 def gonio(left, right, sr, t0, t1, size):
-    """Goniometer density: M = (L+R)/2 up, S = (L-R)/2 across, log-scaled."""
-    a, b = int(t0 * sr), int(t1 * sr)
-    # At most ~400k points, read as contiguous 4096-sample windows spread over
-    # the range: a strided read of a long memmap touches every page anyway.
-    if b - a <= 400_000:
-        L = np.asarray(left[a:b], dtype=np.float64)
-        R = np.asarray(right[a:b], dtype=np.float64)
-    else:
-        w = 4096
-        starts = np.linspace(a, b - w, 100).astype(np.int64)
-        L = np.concatenate([np.asarray(left[s0 : s0 + w], dtype=np.float64) for s0 in starts])
-        R = np.concatenate([np.asarray(right[s0 : s0 + w], dtype=np.float64) for s0 in starts])
-    m, sd = (L + R) / 2, (L - R) / 2
-    lim = max(1e-6, float(np.abs(np.r_[m, sd]).max()))
-    h, _, _ = np.histogram2d(-m / lim, sd / lim, bins=size, range=[[-1, 1], [-1, 1]])
+    """Goniometer density over every sample of the range (dsp.goniometer)."""
+    a, b = int(t0 * sr), int(min(len(left), t1 * sr))
+    h, corr = dsp.goniometer(left, right, a, b, size)
     h = np.log1p(h)
     h = (255 * h / (h.max() or 1)).astype(np.uint8)
-    den = np.sqrt((L**2).sum() * (R**2).sum())
-    corr = float((L * R).sum() / den) if den > 0 else 1.0
     return h.tobytes(), round(corr, 3)
 
 
 def scan_one(path):
-    meta = ffprobe(path)
-    mix, sr = PCM.get(path, "mix")
-    side, _ = PCM.get(path, "side")
-    left, _ = PCM.get(path, "left")
-    right, _ = PCM.get(path, "right")
-    sm = summary_for(path)
-    a = analyse_pcm(mix, side, sr, summary=sm) or {}
-    dyn = dynamics(left, right if meta["channels"] > 1 else left, sr, sm) or {}
-    loud = measure_loudness(path)
+    res = run_analysis(path)
+    meta, a, st = res["meta"], res["analysis"] or {}, res["stats"]
+    dyn, loud = st["dynamics"] or {}, st["loudness"] or {}
     return {
         "name": os.path.basename(path),
         "codec": meta["codecName"],
-        "sampleRate": sr,
+        "sampleRate": meta["sampleRate"],
         "bits": meta["bits"],
-        "duration": round(len(mix) / sr, 2),
+        "duration": round(meta["duration"], 2),
         "bitrate": meta["bitrate"],
         "cutoffHz": a.get("cutoffHz"),
         "level": a.get("level"),
@@ -1123,14 +958,294 @@ def scan_one(path):
     }
 
 
-def measure_loudness(path):
-    """EBU R128 from ffmpeg on the decoded PCM, true peak from true_peak()."""
+# ------------------------------------------------------------------ pipeline
+
+WAVE_BLOCK = 4096
+ANALYSES = collections.OrderedDict()
+ANALYSIS_LOCK = threading.Lock()
+ANALYSIS_RUNNING = {}
+
+
+def _read_rows(mm, a, b):
+    """Rows [a, b) of the decoded PCM with a plain buffered read: sequential
+    reads of a file larger than the page cache are several times faster than
+    faulting a memmap in 4 KB pages."""
+    nch = mm.shape[1]
+    return np.fromfile(mm.filename, dtype=np.float32, count=(b - a) * nch, offset=a * nch * 4).reshape(
+        -1, nch
+    )
+
+
+def _signals32(L32, R32, stereo):
+    if not stereo:
+        return {"mix": L32, "left": L32}
+    return {
+        "mix": (L32 + R32) * np.float32(0.5),
+        "left": L32,
+        "right": R32,
+        "side": (L32 - R32) * np.float32(0.5),
+    }
+
+
+def _persist_path(mm):
+    return os.path.splitext(mm.filename)[0] + f".analysis-{VERSION}.json"
+
+
+PROGRESS = {}  # key -> {"stage": str, "done": 0..1}
+
+
+def _progress(key, stage, done):
+    PROGRESS[key] = {"stage": stage, "done": round(float(done), 3)}
+
+
+def start_analysis(path):
+    """Start the analysis in the background if needed. Returns the result
+    when it is ready, else None (see PROGRESS for how far it is)."""
+    key = (path, os.path.getmtime(path))
+    with ANALYSIS_LOCK:
+        if key in ANALYSES:
+            ANALYSES.move_to_end(key)
+            return ANALYSES[key]
+        if key in ANALYSIS_RUNNING:
+            return None
+    t = threading.Thread(target=lambda: _safe_run(path), daemon=True, name="analysis")
+    t.start()
+    time.sleep(0.05)  # a persisted result is usually back before the first poll
+    with ANALYSIS_LOCK:
+        return ANALYSES.get(key)
+
+
+ANALYSIS_ERRORS = {}
+
+
+def _safe_run(path):
+    key = (path, os.path.getmtime(path))
+    try:
+        run_analysis(path)
+        ANALYSIS_ERRORS.pop(key, None)
+    except Exception as e:  # reported to the client on the next poll
+        ANALYSIS_ERRORS[key] = str(e)[-300:]
+
+
+def run_analysis(path):
+    """Everything the UI shows about a file, from three sequential passes over
+    the decoded PCM, each exact over the whole file (see dsp.py):
+
+    A: block statistics, frame loudness of every signal, waveform index
+    B: per-bin percentile spectra (mix, and left/right/side for the
+       per-channel cut-off), Welch spectrum, clicks, flat tops, goniometer
+    C: sfb21 variability, whose band depends on the cut-off found in B
+
+    ffmpeg's EBU R128 / true-peak pass and the bit-usage count run
+    concurrently. The result is cached in memory and persisted next to the
+    PCM, so a file is analysed once per app version.
+    """
+    key = (path, os.path.getmtime(path))
+    with ANALYSIS_LOCK:
+        if key in ANALYSES:
+            ANALYSES.move_to_end(key)
+            return ANALYSES[key]
+        ev = ANALYSIS_RUNNING.get(key)
+        owner = ev is None
+        if owner:
+            ev = ANALYSIS_RUNNING[key] = threading.Event()
+    if not owner:
+        ev.wait(TIMEOUT * 20)
+        with ANALYSIS_LOCK:
+            if key in ANALYSES:
+                return ANALYSES[key]
+        raise RuntimeError("analysis failed")
+    try:
+        res = _load_or_run(path)
+        with ANALYSIS_LOCK:
+            ANALYSES[key] = res
+            while len(ANALYSES) > 16:
+                ANALYSES.popitem(last=False)
+        return res
+    finally:
+        with ANALYSIS_LOCK:
+            ANALYSIS_RUNNING.pop(key, None)
+        ev.set()
+
+
+def _load_or_run(path):
+    _progress((path, os.path.getmtime(path)), "decoding", 0)
     mm, sr = PCM.open(path)
-    left, _ = PCM.get(path, "left")
-    right, _ = PCM.get(path, "right")
-    out = loudness(path, (mm.filename, sr, mm.shape[1]))
-    out["truePeakDb"] = true_peak(summary_for(path), left, right, sr)
-    return out
+    fn = _persist_path(mm)
+    npz = fn[:-5] + ".npz"
+    if os.path.exists(fn) and os.path.exists(npz):
+        try:
+            with open(fn) as f:
+                res = json.load(f)
+            with np.load(npz) as z:
+                res["index"] = {k[3:]: (z[k], z["mx_" + k[3:]]) for k in z.files if k.startswith("mn_")}
+                res["gonio"] = (z["gonio"], res["goniometerCorrelation"]) if "gonio" in z.files else None
+            return res
+        except (OSError, ValueError, KeyError):
+            pass
+    res = _run(path, mm, sr, key=(path, os.path.getmtime(path)))
+    body = {k: v for k, v in res.items() if k not in ("index", "gonio")}
+    body["goniometerCorrelation"] = res["gonio"][1] if res["gonio"] else None
+    tmp = fn + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(body, f)
+    arrays = {f"mn_{k}": v[0] for k, v in res["index"].items()}
+    arrays.update({f"mx_{k}": v[1] for k, v in res["index"].items()})
+    if res["gonio"]:
+        arrays["gonio"] = res["gonio"][0]
+    np.savez(npz[:-4] + ".tmp.npz", **arrays)
+    os.replace(npz[:-4] + ".tmp.npz", npz)
+    os.replace(tmp, fn)
+    return res
+
+
+def _run(path, mm, sr, key=None):
+    def prog(stage, done):
+        if key is not None:
+            _progress(key, stage, done)
+
+    meta = ffprobe(path)
+    n, stereo = mm.shape[0], mm.shape[1] > 1
+    ext = os.path.splitext(path)[1].lower()
+    lossless = meta["codecName"] in ("flac", "alac", "wavpack", "ape", "tta") or (
+        meta["codecName"] or ""
+    ).startswith("pcm_")
+    side_jobs = {
+        "loudness": lambda: loudness(path, (mm.filename, sr, mm.shape[1])),
+        "bits": (lambda: bit_usage(path, meta["bits"])) if lossless else (lambda: None),
+        "soxbits": (lambda: sox_bitdepth(path))
+        if ext in {".flac", ".wav", ".aif", ".aiff"}
+        else (lambda: None),
+    }
+    side_out = {}
+    threads = [
+        threading.Thread(target=lambda k=k, f=f: side_out.__setitem__(k, f()), daemon=True)
+        for k, f in side_jobs.items()
+    ]
+    for t in threads:
+        t.start()
+
+    names = ("mix", "left", "right", "side") if stereo else ("mix",)
+    sm = dsp.Summary(sr, n, stereo)
+    rms = {s: dsp.FrameRMS(SPEC_N, SPEC_N // 2) for s in names}
+    rms_hf = dsp.FrameRMS(HF_N, HF_N // 2)
+    ext_idx = {
+        s: dsp.BlockExtremes(WAVE_BLOCK)
+        for s in ("mix", "left", "right", "side")
+        if stereo or s in ("mix", "left")
+    }
+
+    # pass A
+    for a in range(0, n, sm.chunk):
+        prog("levels and blocks", a / max(1, n))
+        rows = _read_rows(mm, a, min(n, a + sm.chunk))
+        L32 = rows[:, 0]
+        R32 = rows[:, 1] if stereo else L32
+        sm.feed_pair(L32, R32, a)
+        sig = _signals32(L32, R32, stereo)
+        for s in names:
+            rms[s].feed(sig[s], a)
+        rms_hf.feed(sig["mix"], a)
+        for s, e in ext_idx.items():
+            e.feed(sig[s], a)
+    sm.finish()
+    keeps = {s: dsp.loud_mask(rms[s].finish()) for s in names}
+
+    # pass B
+    spec = {"mix": dsp.SpectrumPercentiles(SPEC_N, SPEC_N // 2, keeps["mix"], (50, 90))}
+    for s in names[1:]:
+        if float(sm.pk["b3"][s].max(initial=0)) > 1e-6:
+            spec[s] = dsp.SpectrumPercentiles(SPEC_N, SPEC_N // 2, keeps[s], (90,))
+    welch = dsp.WelchMean(1 << 16, 1 << 15)
+    clicks = dsp.IsolatedClicks(sr)
+    flat = None
+    if 0 < sm.peak < 0.99997:
+        flat = [dsp.LevelRuns(sr, sm.peak, True) for _ in range(2 if stereo else 1)]
+    gonio = dsp.Goniometer(160, sm.ms_lim) if stereo else None
+    for a in range(0, n, dsp.CHUNK):
+        prog("spectra of every frame", a / max(1, n))
+        rows = _read_rows(mm, a, min(n, a + dsp.CHUNK))
+        L32 = rows[:, 0]
+        R32 = rows[:, 1] if stereo else L32
+        sig = _signals32(L32, R32, stereo)
+        for s, c in spec.items():
+            c.feed(sig[s], a)
+        welch.feed(sig["mix"], a)
+        clicks.feed(sig["mix"], a)
+        if flat:
+            flat[0].feed(L32, a)
+            if stereo:
+                flat[1].feed(R32, a)
+        if gonio:
+            gonio.feed_pair(L32, R32, a)
+    prog("sorting per-bin percentiles", 0)
+    pct = {s: c.finish() for s, c in spec.items()}
+    (med_raw, p90_raw), used = pct["mix"]
+    lp = lowpass(p90_raw, med_raw, sr)
+
+    # pass C
+    hf_sd = None
+    top_hz = hf_band_top(lp["cutoff_hz"], lp["nyq"])
+    if top_hz and n >= SPEC_N * 4:
+        hf = dsp.BandRatioStd(
+            sr, HF_N, HF_N // 2, dsp.loud_mask(rms_hf.finish()), (12000, 15800), (16200, top_hz)
+        )
+        for a in range(0, n, dsp.CHUNK):
+            prog("sfb21 variability", a / max(1, n))
+            rows = _read_rows(mm, a, min(n, a + dsp.CHUNK))
+            L32 = rows[:, 0]
+            hf.feed(_signals32(L32, rows[:, 1] if stereo else L32, stereo)["mix"], a)
+        hf_sd = hf.finish()
+
+    ms_x = sm.total_ss["mix"] / max(1, n)
+    ms_s = sm.total_ss["side"] / max(1, n)
+    side_db = 20 * np.log10((math.sqrt(ms_s) + 1e-12) / (math.sqrt(ms_x) + 1e-12))
+    analysis = (
+        analysis_result(lp, sr, n, hf_sd, side_db, sm.ss["b05"]["mix"], used) if n >= SPEC_N * 4 else None
+    )
+
+    per = {"left": None, "right": None, "side": None}
+    if stereo:
+        for s in ("left", "right", "side"):
+            if s in pct:
+                per[s] = lowpass(pct[s][0][0], None, sr)["cutoff_hz"]
+    else:
+        per["left"] = per["right"] = analysis["cutoffHz"] if analysis else None
+    flat_res = None
+    if flat:
+        cs = [f.finish() for f in flat]
+        flat_res = (sum(c for c, _ in cs), sorted(t for _, ts in cs for t in ts))
+    left = mm[:, 0]
+    right = mm[:, 1] if stereo else left
+    dyn = dynamics(left, right, sr, sm, welch=welch.finish(), clicks=clicks.finish(), flat=flat_res)
+    prog("loudness and true peak (ffmpeg)", 1)
+    for t in threads:
+        t.join(TIMEOUT * 20)
+    meta["bitDepthUsed"] = side_out.get("soxbits")
+    meta["duration"] = n / sr
+    stats = {
+        "loudness": side_out.get("loudness") or {},
+        "dynamics": dyn,
+        "quietFloorDb": quiet_floor(None, sr, sm),
+        "channelCutoffs": per,
+        "bitUsage": side_out.get("bits"),
+    }
+    index = {s: e.finish() for s, e in ext_idx.items()}
+    return {
+        "meta": meta,
+        "analysis": analysis,
+        "stats": stats,
+        "index": index,
+        "gonio": gonio.finish() if gonio else None,
+    }
+
+
+def measure_loudness(path):
+    """EBU R128 integrated loudness, LRA and true peak (4x oversampled, over
+    the whole file) from ffmpeg's ebur128 reference filter, read from the
+    decoded PCM rather than decoding the source again."""
+    mm, sr = PCM.open(path)
+    return loudness(path, (mm.filename, sr, mm.shape[1]))
 
 
 def sox_png(path, q):
@@ -1412,52 +1527,30 @@ class Handler(BaseHTTPRequestHandler):
             200, {"ready": INDEX.ready, "results": INDEX.search(q.get("q", ""), limit)}, compress=True
         )
 
+    def pending(self, full):
+        key = (full, os.path.getmtime(full))
+        if key in ANALYSIS_ERRORS:
+            return self.send(500, {"error": "analysis failed: " + ANALYSIS_ERRORS.pop(key)})
+        return self.send(
+            202,
+            dict(PROGRESS.get(key, {"stage": "queued", "done": 0}), pending=True),
+            {"Retry-After": "1", "Cache-Control": "no-store"},
+        )
+
     def info(self, q):
         full = self.file(q)
-        with JOBS:
-            meta = ffprobe(full)
-            ext = os.path.splitext(full)[1].lower()
-            meta["bitDepthUsed"] = sox_bitdepth(full) if ext in {".flac", ".wav", ".aif", ".aiff"} else None
-            meta["analysis"] = analyse(full)
-            x, sr = PCM.get(full, "mix")
-            meta["duration"] = len(x) / sr  # decoded length beats container metadata
-        meta["path"] = q.get("path", "")
-        return self.send(200, meta, compress=True)
+        res = start_analysis(full)
+        if res is None:
+            return self.pending(full)
+        out = dict(res["meta"], analysis=res["analysis"], path=q.get("path", ""))
+        return self.send(200, out, compress=True)
 
     def stats(self, q):
         full = self.file(q)
-        key = (full, os.path.getmtime(full))
-        hit = STATS.get(key)
-        if hit is None:
-            with JOBS:
-                left, sr = PCM.get(full, "left")
-                right, _ = PCM.get(full, "right")
-                side, _ = PCM.get(full, "side")
-                mix, _ = PCM.get(full, "mix")
-                meta = ffprobe(full)
-                per = {}
-                stereo = meta["channels"] > 1
-                for name, arr in (("left", left), ("right", right), ("side", side)):
-                    if not stereo and name != "left":
-                        per[name] = per["left"] if name == "right" else None
-                        continue
-                    live = float(summary_for(full).absmax(name).max(initial=0)) > 1e-6
-                    r = analyse_pcm(arr, side, sr, levels=False) if live else None
-                    per[name] = r["cutoffHz"] if r else None
-                lossless = meta["codecName"] in ("flac", "alac", "wavpack", "ape", "tta") or (
-                    meta["codecName"] or ""
-                ).startswith("pcm_")
-                hit = {
-                    "loudness": measure_loudness(full),
-                    "dynamics": dynamics(left, right if stereo else left, sr, summary_for(full)),
-                    "quietFloorDb": quiet_floor(mix, sr, summary_for(full)),
-                    "channelCutoffs": per,
-                    "bitUsage": bit_usage(full, meta["bits"]) if lossless else None,
-                }
-            STATS[key] = hit
-            while len(STATS) > 256:
-                STATS.pop(next(iter(STATS)))
-        return self.send(200, hit, compress=True)
+        res = start_analysis(full)
+        if res is None:
+            return self.pending(full)
+        return self.send(200, res["stats"], compress=True)
 
     def scan(self, q):
         """Album scan: one NDJSON line per track, streamed as each finishes."""
@@ -1510,7 +1603,13 @@ class Handler(BaseHTTPRequestHandler):
             t0 = num(q, "t0", 0, 0, dur)
             t1 = num(q, "t1", dur, t0 + 1e-3, dur)
             size = num(q, "size", 160, 32, 512, int)
-            body, corr = gonio(left, right, sr, t0, t1, size)
+            cached = ANALYSES.get((full, os.path.getmtime(full)))
+            if cached and cached.get("gonio") is not None and size == 160 and t0 == 0 and t1 >= dur - 1e-6:
+                h, corr = cached["gonio"]
+                h = np.log1p(h)
+                body, corr = (255 * h / (h.max() or 1)).astype(np.uint8).tobytes(), round(corr, 3)
+            else:
+                body, corr = gonio(left, right, sr, t0, t1, size)
         return self.send(
             200,
             body,
@@ -1565,8 +1664,13 @@ class Handler(BaseHTTPRequestHandler):
             t0 = num(q, "t0", 0, 0, dur)
             t1 = num(q, "t1", dur, t0 + 1e-3, dur)
             cols = num(q, "cols", 1200, 16, 8192, int)
-            if (t1 - t0) / cols >= 4 * SUMMARY_BLOCK:
-                body = summary_peaks(summary_for(full), ch, t0, t1, cols)
+            cached = ANALYSES.get((full, os.path.getmtime(full)))
+            idx = (cached or {}).get("index", {}).get(ch)
+            span = (t1 - t0) * sr / cols
+            if idx is not None and span >= 4 * WAVE_BLOCK:
+                a0 = int(max(0, t0 * sr))
+                b0 = int(min(len(x), max(a0 + 1, t1 * sr)))
+                body = dsp.column_extremes(x, a0, b0, cols, idx, WAVE_BLOCK).tobytes()
             else:
                 body = peaks(x, sr, t0, t1, cols)
         return self.send(
