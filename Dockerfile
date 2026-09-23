@@ -33,8 +33,12 @@ WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 # System interpreter, no venv: the image IS the environment.
-ENV UV_PROJECT_ENVIRONMENT=/usr/local UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
-RUN uv sync --frozen --no-dev --no-install-project && rm /usr/local/bin/uv
+ENV UV_PROJECT_ENVIRONMENT=/usr/local UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_NO_CACHE=1
+# pip is not needed at runtime and carries vendored packages that Trivy flags
+# (msgpack, the ensurepip setuptools wheel); drop it with uv itself.
+RUN uv sync --frozen --no-dev --no-install-project \
+    && python3 -m pip uninstall -y -q pip \
+    && rm -rf /usr/local/bin/uv /usr/local/lib/python3*/ensurepip /root/.cache
 
 # Decoded audio is cached here as memory-mapped float32 (about 1.3 GB per hour
 # of stereo 48 kHz). Mount a disk volume on it; a named volume inherits this
