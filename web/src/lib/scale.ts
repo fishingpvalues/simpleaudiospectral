@@ -1,11 +1,17 @@
 import type { Scale } from "./api"
 
-export interface View { t0: number; t1: number; f0: number; f1: number }
+export interface View {
+  t0: number
+  t1: number
+  f0: number
+  f1: number
+}
 
 /** Frequency -> 0..1 from the TOP of the plot (1 = f0 at the bottom). */
 export function fToY(f: number, v: View, scale: Scale): number {
   if (scale === "log") {
-    const lo = Math.log(Math.max(v.f0, 10)), hi = Math.log(v.f1)
+    const lo = Math.log(Math.max(v.f0, 10)),
+      hi = Math.log(v.f1)
     return (hi - Math.log(Math.max(f, 10))) / (hi - lo)
   }
   return (v.f1 - f) / (v.f1 - v.f0)
@@ -13,7 +19,8 @@ export function fToY(f: number, v: View, scale: Scale): number {
 
 export function yToF(y: number, v: View, scale: Scale): number {
   if (scale === "log") {
-    const lo = Math.log(Math.max(v.f0, 10)), hi = Math.log(v.f1)
+    const lo = Math.log(Math.max(v.f0, 10)),
+      hi = Math.log(v.f1)
     return Math.exp(hi - y * (hi - lo))
   }
   return v.f1 - y * (v.f1 - v.f0)
@@ -40,7 +47,10 @@ export function freqTicks(v: View, scale: Scale, px: number): number[] {
   if (scale === "log") {
     const out: number[] = []
     for (const d of [10, 100, 1000, 10000, 100000])
-      for (const m of [1, 2, 5]) { const f = d * m; if (f >= v.f0 && f <= v.f1) out.push(f) }
+      for (const m of [1, 2, 5]) {
+        const f = d * m
+        if (f >= v.f0 && f <= v.f1) out.push(f)
+      }
     return out
   }
   const step = niceStep(v.f1 - v.f0, px / 26)

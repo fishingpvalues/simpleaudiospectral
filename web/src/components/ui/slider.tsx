@@ -2,8 +2,18 @@ import * as React from "react"
 import { Slider as SliderPrimitive } from "radix-ui"
 import { cn } from "@/lib/utils"
 
-function Slider({ className, value, defaultValue, min = 0, max = 100, ...props }: React.ComponentProps<typeof SliderPrimitive.Root>) {
-  const values = React.useMemo(() => (Array.isArray(value) ? value : Array.isArray(defaultValue) ? defaultValue : [min, max]), [value, defaultValue, min, max])
+function Slider({
+  className,
+  value,
+  defaultValue,
+  min = 0,
+  max = 100,
+  ...props
+}: React.ComponentProps<typeof SliderPrimitive.Root>) {
+  const values = React.useMemo(
+    () => (Array.isArray(value) ? value : Array.isArray(defaultValue) ? defaultValue : [min, max]),
+    [value, defaultValue, min, max],
+  )
   return (
     <SliderPrimitive.Root
       value={value}
@@ -17,7 +27,10 @@ function Slider({ className, value, defaultValue, min = 0, max = 100, ...props }
         <SliderPrimitive.Range className="absolute h-full bg-primary" />
       </SliderPrimitive.Track>
       {values.map((_, i) => (
-        <SliderPrimitive.Thumb key={i} className="block size-3.5 rounded-full border border-primary bg-background shadow-sm transition-[color,box-shadow] hover:ring-4 hover:ring-ring/40 focus-visible:ring-4 focus-visible:ring-ring/50 focus-visible:outline-none" />
+        <SliderPrimitive.Thumb
+          key={i}
+          className="block size-3.5 rounded-full border border-primary bg-background shadow-sm transition-[color,box-shadow] hover:ring-4 hover:ring-ring/40 focus-visible:ring-4 focus-visible:ring-ring/50 focus-visible:outline-none"
+        />
       ))}
     </SliderPrimitive.Root>
   )

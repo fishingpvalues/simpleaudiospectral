@@ -59,9 +59,25 @@
 }
 
 @layer base {
-  * { @apply border-border outline-ring/50; }
-  html, body, #root { @apply h-full; }
-  body { @apply bg-background text-foreground font-sans antialiased overflow-hidden; }
-  ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 12%); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+  body {
+    @apply overflow-hidden bg-background font-sans text-foreground antialiased;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(1 0 0 / 12%);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
 }

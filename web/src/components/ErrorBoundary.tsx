@@ -1,6 +1,8 @@
 import { Component, type ReactNode } from "react"
 
-interface State { error: Error | null }
+interface State {
+  error: Error | null
+}
 
 /** Keeps one failing panel from unmounting the whole app. */
 export class ErrorBoundary extends Component<{ children: ReactNode; label: string }, State> {
@@ -20,7 +22,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode; label: strin
       <div role="alert" className="m-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
         <div className="font-medium text-destructive">{this.props.label} failed to render</div>
         <div className="mt-1 font-mono text-xs text-muted-foreground">{this.state.error.message}</div>
-        <button className="mt-2 text-xs underline" onClick={() => this.setState({ error: null })}>Retry</button>
+        <button className="mt-2 text-xs underline" onClick={() => this.setState({ error: null })}>
+          Retry
+        </button>
       </div>
     )
   }
