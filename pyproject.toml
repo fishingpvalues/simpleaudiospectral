@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "simpleaudiospectral"
-version = "0.0.4"
+version = "0.0.5"
 description = "Fake FLAC detector and spectrogram viewer for lossless audio"
 readme = "README.md"
 license = "MIT"

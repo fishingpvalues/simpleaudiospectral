@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.5](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.4...v0.0.5) (2026-09-24)
+
+
+### Features
+
+* **analysis:** verdicts state the measured evidence in one short sentence ([dfb1cbd](https://github.com/fishingpvalues/simpleaudiospectral/commit/dfb1cbd8367fc0909227553965dfea4b57196e35))
+
+
+### Bug Fixes
+
+* concurrent requests for one SoX image no longer fail with 500 ([dfb1cbd](https://github.com/fishingpvalues/simpleaudiospectral/commit/dfb1cbd8367fc0909227553965dfea4b57196e35))
+
+
+### Refactoring
+
+* src/ package for the backend, small modules for the UI ([dfb1cbd](https://github.com/fishingpvalues/simpleaudiospectral/commit/dfb1cbd8367fc0909227553965dfea4b57196e35))
+
 ## [0.0.4](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.3...v0.0.4) (2026-09-24)
 
 
