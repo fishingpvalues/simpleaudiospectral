@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.4](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.3...v0.0.4) (2026-09-24)
+
+
+### Features
+
+* **security:** optional API key with login, lockout and hardened HTTP ([f5215f1](https://github.com/fishingpvalues/simpleaudiospectral/commit/f5215f1a08ee9c4b042f8132aa1544aad3201de3))
+* **ui:** encoder lowpass lines from encoder sources, chosen per encoder ([f5215f1](https://github.com/fishingpvalues/simpleaudiospectral/commit/f5215f1a08ee9c4b042f8132aa1544aad3201de3))
+
+
+### Bug Fixes
+
+* keep 24-bit precision when piping non-native formats to SoX ([f5215f1](https://github.com/fishingpvalues/simpleaudiospectral/commit/f5215f1a08ee9c4b042f8132aa1544aad3201de3))
+* stop the API when make dev exits ([f5215f1](https://github.com/fishingpvalues/simpleaudiospectral/commit/f5215f1a08ee9c4b042f8132aa1544aad3201de3))
+* **ui:** report playback that fails even after the FLAC transcode ([f5215f1](https://github.com/fishingpvalues/simpleaudiospectral/commit/f5215f1a08ee9c4b042f8132aa1544aad3201de3))
+
 ## [0.0.3](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.2...v0.0.3) (2026-09-23)
 
 
