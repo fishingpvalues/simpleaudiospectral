@@ -73,7 +73,7 @@ export const GLOSSARY = {
     "Colour mapping from level to colour. The colour-blind safe maps are perceptually uniform and readable with deuteranopia and protanopia.",
   range:
     "Levels mapped to the colour scale. Everything below the floor is black; lowering the floor reveals quieter detail and noise.",
-  refs: "Lowpass frequencies of common MP3 settings from the RED spectral guide: 16 kHz (128k), 18.5 (V2), 19 (192k), 19.5 (V0), 20 (256k), 20.5 (320k).",
+  refs: "Where common encoder settings stop coding, from the encoders' source code and verified by measurement. Choose the encoders in Display settings; a cut-off that sits on one of these lines names its likely source.",
   cutoffLine: "Draws the automatically detected cut-off on the spectrogram.",
   holes:
     "Marks cells in the 16 kHz-to-cut-off band that drop far below what that row usually carries. Lossy codecs drop whole bands per frame, which shows as rectangles.",
@@ -81,9 +81,9 @@ export const GLOSSARY = {
     "Frequency below which 99% of each frame's energy lies. A flat line is an encoder lowpass; a line that moves with the music is a real top end.",
   follow: "Scroll the view to keep the playhead visible during playback.",
   redZoom:
-    "Zoom to the loudest 8 seconds and the top of the band: the zoomed spectral reviewers ask for alongside the full one.",
+    "Zoom to the loudest 8 seconds and the top of the band, where encoder lowpasses, shelves and holes are easiest to see.",
   exportPng: "Download exactly what is on screen, with title, ruler, waveform and frequency axis.",
-  sox: "Render the classic SoX spectral (1800x1025, Kaiser window, 120 dB range) that uploaders attach to a release.",
+  sox: "Render the widely used SoX spectrogram (1800x1025, Kaiser window, 120 dB range), comparable across tools and files.",
   hzPerBin: "Frequency resolution of the current FFT size, and the length of one analysis frame.",
   // album scan
   scanLikely: "Most likely source codec from the cut-off and HF variability, or lossless when there is no wall.",

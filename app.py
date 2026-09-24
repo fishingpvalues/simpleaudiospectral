@@ -19,15 +19,25 @@ GET /api/wave?path=&ch=&t0=&t1=&cols=
 GET /api/audio?path=            the file itself, Range-capable, for playback
 GET /api/spectrogram?path=&ch=&z=&start=&dur=&w=&x=
                                 SoX PNG, the classic spectral to post with an upload
+POST /api/login {"key": ...}    exchange the API key for a session cookie
+POST /api/logout                clear that cookie
 GET /*                          the bundled UI (web/dist)
+
+With API_KEY set, every /api/ route except health, login and logout needs the
+key: "Authorization: Bearer <key>", "X-API-Key: <key>", or the session cookie
+from /api/login (which the browser also sends for <audio> and <img>).
 
 Everything under LIBRARY_ROOT is read-only. Paths are resolved with realpath
 and must stay inside the root, so a symlink cannot escape it.
 """
 
 import collections
+import contextlib
 import gzip
 import hashlib
+import hmac
+import http.cookies
+import ipaddress
 import json
 import math
 import mimetypes
@@ -57,6 +67,52 @@ WEB = os.path.realpath(
 PCM_DIR = os.environ.get("PCM_DIR", "/pcm")
 PCM_DISK_BUDGET = int(float(os.environ.get("PCM_DISK_GB", "20")) * 1024**3)
 CHUNK = 1 << 22  # samples per chunk in whole-track passes (~16 MB float32)
+
+
+def _secret(name):
+    """NAME, or the contents of the file in NAME_FILE (Docker/compose secrets),
+    so the key need not sit in the environment or `docker inspect`."""
+    path = os.environ.get(name + "_FILE")
+    if path:
+        with open(path) as f:
+            return f.read().strip()
+    return os.environ.get(name, "")
+
+
+# Empty: no authentication (loopback or an authenticating proxy in front).
+API_KEY = _secret("API_KEY")
+SESSION_COOKIE = "sas_session"
+SESSION_MAX_AGE = 30 * 24 * 3600
+PUBLIC_API = {"/api/health", "/api/login", "/api/logout"}
+# Brute force: LOCKOUT_FAILS wrong keys from one client (an IPv6 /64 counts as
+# one) within LOCKOUT_WINDOW seconds, and that client's key checks answer 429
+# until the oldest failure ages out. Nothing sleeps, so a flood holds no threads.
+LOCKOUT_FAILS = 5
+LOCKOUT_WINDOW = 300
+# Reverse proxies whose X-Forwarded-For is believed. Without this every client
+# behind a proxy is the proxy's address; with it, a direct client cannot forge one.
+TRUSTED_PROXIES = [
+    ipaddress.ip_network(n.strip(), strict=False)
+    for n in os.environ.get("TRUSTED_PROXIES", "").split(",")
+    if n.strip()
+]
+MAX_CONNECTIONS = int(os.environ.get("MAX_CONNECTIONS", "128"))
+SOCKET_TIMEOUT = 60  # seconds a client may stall a read or write (slowloris)
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    # Radix injects <style> for scroll locking, hence style-src 'unsafe-inline';
+    # scripts are only the bundle.
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; "
+        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    ),
+}
 
 
 def _version():
@@ -98,6 +154,88 @@ SOX_NATIVE = {".flac", ".mp3", ".wav", ".aif", ".aiff", ".ogg"}
 SOX_WINDOWS = {"Kaiser", "Hann", "Hamming", "Bartlett", "Rectangular", "Dolph"}
 CHANNELS = {"mix", "left", "right", "side"}
 DB_FLOOR = -160.0  # uint8 0 = DB_FLOOR dBFS, 255 = 0 dBFS
+# Library files can come from anywhere (downloads, rips). A file that is really
+# a playlist or concat script must not make ffmpeg open URLs or other files.
+NO_NET = ("-protocol_whitelist", "file,pipe")
+
+
+def _sign(msg):
+    return hmac.new(
+        API_KEY.encode(), b"simpleaudiospectral session v2|" + msg.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def new_session(now=None):
+    """Cookie value "<expiry>.<hmac>": signed with the key, so the key itself
+    never sits in the browser, the server enforces the expiry, and changing
+    API_KEY ends every session."""
+    exp = str(int((now or time.time()) + SESSION_MAX_AGE))
+    return f"{exp}.{_sign(exp)}"
+
+
+def session_valid(value):
+    exp, _, sig = (value or "").partition(".")
+    if not (exp.isascii() and exp.isdigit()) or int(exp) < time.time():
+        return False
+    return hmac.compare_digest(sig.encode(), _sign(exp).encode())
+
+
+def key_matches(key):
+    return bool(key) and hmac.compare_digest(key.encode(), API_KEY.encode())
+
+
+def _trusted(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a in n for n in TRUSTED_PROXIES)
+
+
+class Lockout:
+    """Recent failed key checks per client; see LOCKOUT_FAILS."""
+
+    def __init__(self):
+        self.fails = {}
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def bucket(ip):
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return ip
+        return str(ipaddress.ip_network(f"{a}/64", strict=False)) if a.version == 6 else str(a)
+
+    def retry_after(self, ip):
+        """Seconds until this client may try a key again (0 = now)."""
+        now = time.time()
+        with self.lock:
+            ts = [t for t in self.fails.get(self.bucket(ip), ()) if t > now - LOCKOUT_WINDOW]
+            if len(ts) < LOCKOUT_FAILS:
+                return 0
+            return math.ceil(ts[-LOCKOUT_FAILS] + LOCKOUT_WINDOW - now)
+
+    def fail(self, ip):
+        now = time.time()
+        with self.lock:
+            b = self.bucket(ip)
+            ts = [t for t in self.fails.get(b, ()) if t > now - LOCKOUT_WINDOW][-LOCKOUT_FAILS:]
+            self.fails[b] = [*ts, now]
+            if len(self.fails) > 10000:  # a spray from many addresses: drop the aged-out ones
+                self.fails = {k: v for k, v in self.fails.items() if v[-1] > now - LOCKOUT_WINDOW}
+
+
+LOCKOUT = Lockout()
+
+
+def public_error(e):
+    """Exception text for a client, without the absolute paths of the host."""
+    msg = str(e)[-400:]
+    for p in {ROOT, CACHE, PCM_DIR}:
+        if p:
+            msg = msg.replace(p, "")
+    return msg
 
 
 def resolve(rel):
@@ -207,6 +345,7 @@ class PcmCache:
                 "ffprobe",
                 "-v",
                 "error",
+                *NO_NET,
                 "-select_streams",
                 "a:0",
                 "-show_entries",
@@ -231,6 +370,7 @@ class PcmCache:
                         "ffmpeg",
                         "-v",
                         "error",
+                        *NO_NET,
                         "-i",
                         path,
                         "-map",
@@ -290,7 +430,6 @@ def block_sums(x, blk):
 
 
 PCM = PcmCache()
-STATS = {}
 SCAN = {}
 
 
@@ -382,7 +521,9 @@ def peaks(x, sr, t0, t1, cols):
 
 
 def ffprobe(path):
-    p = run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path])
+    p = run(
+        ["ffprobe", "-v", "error", *NO_NET, "-print_format", "json", "-show_format", "-show_streams", path]
+    )
     try:
         data = json.loads(p.stdout or b"{}")
     except ValueError:
@@ -722,6 +863,7 @@ def loudness(path, raw=None):
             "ffmpeg",
             "-hide_banner",
             "-nostats",
+            *NO_NET,
             *src,
             "-af",
             "ebur128=peak=true:framelog=verbose,astats=measure_perchannel=none:measure_overall="
@@ -870,7 +1012,21 @@ def bit_usage(path, declared):
     """
     bits = declared if declared in (16, 20, 24, 32) else 24
     proc = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0", "-f", "s32le", "-acodec", "pcm_s32le", "-"],
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            *NO_NET,
+            "-i",
+            path,
+            "-map",
+            "0:a:0",
+            "-f",
+            "s32le",
+            "-acodec",
+            "pcm_s32le",
+            "-",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
@@ -1293,7 +1449,22 @@ def sox_png(path, q):
         p = run(["sox", path, "-n", *effects, *spec])
     else:
         dec = subprocess.Popen(
-            ["ffmpeg", "-v", "error", "-i", path, "-f", "wav", "-"],
+            # WAV defaults to 16-bit; s32 keeps a 24-bit source's noise floor.
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                *NO_NET,
+                "-i",
+                path,
+                "-map",
+                "0:a:0",
+                "-c:a",
+                "pcm_s32le",
+                "-f",
+                "wav",
+                "-",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
@@ -1393,9 +1564,64 @@ def num(q, k, default, lo, hi, cast=float):
     return min(hi, max(lo, v))
 
 
+class Server(ThreadingHTTPServer):
+    """At most MAX_CONNECTIONS handler threads; further connections are closed
+    at once instead of each getting a thread."""
+
+    daemon_threads = True
+
+    def __init__(self, addr, handler, max_connections=MAX_CONNECTIONS):
+        self.slots = threading.BoundedSemaphore(max_connections)
+        super().__init__(addr, handler)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "spectrals"
+    server_version = "simpleaudiospectral"
     protocol_version = "HTTP/1.1"
+    timeout = SOCKET_TIMEOUT
+
+    def version_string(self):
+        return self.server_version  # no Python version in the Server header
+
+    def end_headers(self):
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
+        if self.https():
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        super().end_headers()
+
+    def https(self):
+        """Behind a TLS-terminating proxy that says so."""
+        h = getattr(self, "headers", None)  # absent when the request line itself was bad
+        return bool(h) and h.get("X-Forwarded-Proto") == "https"
+
+    def client_ip(self):
+        """The peer, or with a TRUSTED_PROXIES peer the last X-Forwarded-For hop
+        that is not a trusted proxy (the earlier hops are client-controlled)."""
+        peer = self.client_address[0]
+        if not _trusted(peer):
+            return peer
+        hops = [h.strip() for h in (self.headers.get("X-Forwarded-For") or "").split(",") if h.strip()]
+        for hop in reversed(hops):
+            if not _trusted(hop):
+                return hop
+        return peer
 
     def log_message(self, fmt, *args):
         if os.environ.get("ACCESS_LOG"):
@@ -1412,7 +1638,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -1422,10 +1647,99 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def check_key(self, key):
+        """ "ok", "wrong" or "locked" for a presented key, counting failures per client."""
+        ip = self.client_ip()
+        if LOCKOUT.retry_after(ip):
+            return "locked"
+        if key_matches(key):
+            return "ok"
+        LOCKOUT.fail(ip)
+        # One line per failure, with the client, for fail2ban or CrowdSec.
+        sys.stderr.write(f"auth failure from {ip}: {self.command} {urllib.parse.urlparse(self.path).path}\n")
+        return "wrong"
+
+    def auth(self):
+        """ "ok" without API_KEY or with a valid session cookie or key, else
+        "missing", "wrong" or "locked". The key is only read from headers,
+        never the query string, which ends up in proxy and access logs."""
+        if not API_KEY:
+            return "ok"
+        jar = http.cookies.SimpleCookie()
+        with contextlib.suppress(http.cookies.CookieError):
+            jar.load(self.headers.get("Cookie") or "")
+        m = jar.get(SESSION_COOKIE)
+        if m and session_valid(m.value):
+            return "ok"  # a valid session works even while its address is locked out
+        h = self.headers.get("Authorization") or ""
+        key = h[7:].strip() if h[:7].lower() == "bearer " else self.headers.get("X-API-Key", "")
+        return self.check_key(key) if key else "missing"
+
+    def deny(self, state):
+        if state == "locked":
+            wait = LOCKOUT.retry_after(self.client_ip())
+            return self.send(
+                429,
+                {"error": "too many wrong keys, try again later"},
+                headers={"Retry-After": str(max(1, wait)), "Cache-Control": "no-store"},
+            )
+        return self.send(
+            401,
+            {"error": "API key required" if state == "missing" else "wrong API key"},
+            headers={"WWW-Authenticate": 'Bearer realm="simpleaudiospectral"', "Cache-Control": "no-store"},
+        )
+
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        try:
+            # Login CSRF and logout CSRF: browsers mark requests from other
+            # sites; only this origin (or a non-browser client) may post.
+            if self.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
+                return self.send(403, {"error": "cross-site request"})
+            if u.path == "/api/login":
+                return self.login()
+            if u.path == "/api/logout":
+                return self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie("", 0)})
+            return self.send(404, {"error": "not found"})
+        except (ValueError, KeyError) as e:
+            return self.send(400, {"error": str(e)})
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return None
+        except Exception as e:
+            return self.send(500, {"error": public_error(e)})
+
+    def cookie(self, value, max_age):
+        secure = "; Secure" if self.https() else ""
+        return f"{SESSION_COOKIE}={value}; Max-Age={max_age}; Path=/api; HttpOnly; SameSite=Strict{secure}"
+
+    def login(self):
+        """POST {"key": ...}: sets the session cookie the UI and media elements use."""
+        if not API_KEY:
+            return self.send(200, {"ok": True, "auth": False})
+        if "application/json" not in (self.headers.get("Content-Type") or ""):
+            raise ValueError("expected application/json")
+        n = int(self.headers.get("Content-Length") or 0)
+        if not 0 < n <= 4096:
+            raise ValueError("bad request body")
+        body = json.loads(self.rfile.read(n))
+        key = body.get("key") if isinstance(body, dict) else None
+        state = self.check_key(key) if isinstance(key, str) and key else "wrong"
+        if state != "ok":
+            return self.deny(state)
+        return self.send(
+            200,
+            {"ok": True, "auth": True},
+            headers={"Set-Cookie": self.cookie(new_session(), SESSION_MAX_AGE), "Cache-Control": "no-store"},
+        )
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         try:
+            if u.path.startswith("/api/") and u.path not in PUBLIC_API:
+                state = self.auth()
+                if state != "ok":
+                    return self.deny(state)
             route = {
                 "/api/health": self.health,
                 "/api/ls": self.ls,
@@ -1451,10 +1765,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {"error": "no such file"})
         except (ValueError, KeyError) as e:
             return self.send(400, {"error": str(e)})
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return None
         except Exception as e:
-            return self.send(500, {"error": str(e)[-400:]})
+            return self.send(500, {"error": public_error(e)})
 
     def static(self, path):
         rel = urllib.parse.unquote(path).lstrip("/") or "index.html"
@@ -1480,7 +1794,22 @@ class Handler(BaseHTTPRequestHandler):
         return full
 
     def health(self, q):
-        return self.send(200, {"status": "ok", "version": VERSION, "indexed": INDEX.ready})
+        ok = self.auth() == "ok"
+        return self.send(
+            200,
+            # Signed out, only what the login screen needs: no version to match
+            # against advisories, no library state.
+            {
+                "status": "ok",
+                "version": VERSION,
+                "indexed": INDEX.ready,
+                "auth": bool(API_KEY),
+                "authenticated": True,
+            }
+            if ok
+            else {"status": "ok", "auth": True, "authenticated": False},
+            headers={"Cache-Control": "no-store"},
+        )
 
     def ls(self, q):
         full = resolve(q.get("path", ""))
@@ -1740,6 +2069,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ffmpeg",
                 "-v",
                 "error",
+                *NO_NET,
                 "-i",
                 full,
                 "-map",
@@ -1788,9 +2118,16 @@ def main():
     os.makedirs(CACHE, exist_ok=True)
     INDEX.start()
     # 0.0.0.0 inside the container only; compose publishes it on loopback.
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)  # noqa: S104
-    srv.daemon_threads = True
+    if API_KEY and len(API_KEY) < 16:
+        sys.exit("API_KEY is too short: use at least 16 random characters (openssl rand -hex 32)")
+    srv = Server(("0.0.0.0", PORT), Handler)  # noqa: S104
     print(f"simpleaudiospectral on :{PORT}, library {ROOT}, ui {WEB}", flush=True)
+    if not API_KEY:
+        print("API_KEY unset: no authentication", flush=True)
+    elif len(API_KEY) < 32:
+        print("warning: API_KEY is short; use 32+ random characters (openssl rand -hex 32)", flush=True)
+    if TRUSTED_PROXIES:
+        print(f"trusting X-Forwarded-For from {', '.join(map(str, TRUSTED_PROXIES))}", flush=True)
     srv.serve_forever()
 
 

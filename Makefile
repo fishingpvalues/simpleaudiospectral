@@ -22,7 +22,8 @@ web:             ## build the UI into web/dist
 	cd web && npm ci --no-audit --no-fund && npm run build
 
 dev:             ## API on :4748 against ./library, Vite on :5173
-	LIBRARY_ROOT=$${LIBRARY_ROOT:-./library} WEB_DIR=web/dist uv run app.py & cd web && npm run dev
+	LIBRARY_ROOT=$${LIBRARY_ROOT:-./library} WEB_DIR=web/dist uv run app.py & api=$$!; \
+	trap 'kill $$api 2>/dev/null' EXIT; cd web && npm run dev
 
 build:           ## container image
 	docker build --build-arg VERSION=$$(cat version.txt) -t simpleaudiospectral .

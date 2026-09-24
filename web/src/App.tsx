@@ -5,6 +5,7 @@ import {
   Grid3x3,
   ImageDown,
   Loader2,
+  LogOut,
   Maximize2,
   PanelLeft,
   PanelRight,
@@ -19,6 +20,7 @@ import {
 } from "lucide-react"
 import { api, type Channel, type Info, type Progress, type Scale } from "@/lib/api"
 import { COLORMAP_GROUPS } from "@/lib/colormaps"
+import { DEFAULT_REF_SETS, REF_SETS, type RefSetId } from "@/lib/references"
 import { fmtHz, fmtTime, type View } from "@/lib/scale"
 import { Analysis } from "@/components/Analysis"
 import { AlbumScan } from "@/components/AlbumScan"
@@ -55,6 +57,7 @@ export interface Settings {
   floor: number
   ceil: number
   refs: boolean
+  refSets: RefSetId[]
   cutoff: boolean
   grid: boolean
   follow: boolean
@@ -71,6 +74,7 @@ const DEFAULTS: Settings = {
   floor: -120,
   ceil: 0,
   refs: true,
+  refSets: DEFAULT_REF_SETS,
   cutoff: true,
   grid: true,
   follow: true,
@@ -108,6 +112,7 @@ export function App() {
   const [scanDir, setScanDir] = useState<string | null>(null)
   const [viewSpec, setViewSpec] = useState<{ hz: Float32Array; db: Float32Array } | null>(null)
   const [transcode, setTranscode] = useState(false)
+  const [playError, setPlayError] = useState<string | null>(null)
   const exporter = useRef<(() => string | null) | null>(null)
   // Zoom history: a burst of wheel events is one step, so only push when the
   // previous change is more than 400 ms old.
@@ -145,10 +150,14 @@ export function App() {
   // after zoom/pan settles, instead of every intermediate frame.
   const [announce, setAnnounce] = useState("")
   const [version, setVersion] = useState<string | null>(null)
+  const [authOn, setAuthOn] = useState(false)
   useEffect(() => {
-    fetch("/api/health")
-      .then(r => r.json())
-      .then(h => setVersion(h.version))
+    api
+      .health()
+      .then(h => {
+        setVersion(h.version)
+        setAuthOn(h.auth)
+      })
       .catch(() => {})
   }, [])
   useEffect(() => {
@@ -201,6 +210,7 @@ export function App() {
     setError(null)
     setInfo(null)
     setTranscode(false)
+    setPlayError(null)
     setViewSpec(null)
     setProgress(null)
     api
@@ -230,7 +240,7 @@ export function App() {
     }
   }, [])
 
-  // RED-style zoomed spectral: the loudest 8 s, top of the band.
+  // Detail zoom: the loudest 8 s, top of the band.
   const redZoom = useCallback(() => {
     if (!info) return
     const t0 = info.analysis?.loudestAt ?? 0,
@@ -267,7 +277,7 @@ export function App() {
     if (!a || !info) return
     if (a.paused) {
       if (a.currentTime < view.t0 || a.currentTime > view.t1) a.currentTime = view.t0
-      void a.play()
+      a.play().catch(() => {}) // an unplayable source is handled by onError
     } else a.pause()
   }, [info, view])
 
@@ -401,6 +411,13 @@ export function App() {
               )}
             </div>
           )}
+          {authOn && (
+            <Tip label="Sign out">
+              <Button variant="ghost" size="icon-sm" onClick={() => void api.logout()}>
+                <LogOut />
+              </Button>
+            </Tip>
+          )}
           <Tip label="Analysis panel">
             <Button variant="ghost" size="icon-sm" onClick={() => setRight(v => !v)} disabled={!info}>
               <PanelRight />
@@ -424,6 +441,11 @@ export function App() {
                   {playing ? <Pause /> : <Play />}
                 </Button>
               </Tip>
+              {playError && (
+                <span role="alert" className="text-xs text-destructive">
+                  {playError}
+                </span>
+              )}
               <Tip label="Back to start (Home)">
                 <Button
                   variant="ghost"
@@ -539,7 +561,24 @@ export function App() {
                     </Select>
                   </div>
                   <Separator />
-                  <Toggle label="RED lowpass references" t="refs" k="refs" settings={settings} set={set} />
+                  <Toggle label="Encoder lowpass lines (R)" t="refs" k="refs" settings={settings} set={set} />
+                  <fieldset className="flex flex-col gap-1.5 pl-3" disabled={!settings.refs}>
+                    <legend className="sr-only">Encoders to draw</legend>
+                    {REF_SETS.map(r => (
+                      <div key={r.id} className="flex items-center justify-between text-xs text-muted-foreground">
+                        <Tip label={r.source}>
+                          <span>{r.name}</span>
+                        </Tip>
+                        <Switch
+                          aria-label={`${r.name} lowpass lines`}
+                          checked={settings.refSets.includes(r.id)}
+                          onCheckedChange={v =>
+                            set("refSets", v ? [...settings.refSets, r.id] : settings.refSets.filter(x => x !== r.id))
+                          }
+                        />
+                      </div>
+                    ))}
+                  </fieldset>
                   <Toggle label="Detected cut-off line" t="cutoffLine" k="cutoff" settings={settings} set={set} />
                   <Toggle label="Grid" k="grid" settings={settings} set={set} />
                   <Toggle label="Follow playhead" t="follow" k="follow" settings={settings} set={set} />
@@ -571,7 +610,7 @@ export function App() {
               <Tip label={`${GLOSSARY.redZoom} (Z)`}>
                 <Button variant="outline" size="sm" onClick={redZoom}>
                   <Crosshair />
-                  RED zoom
+                  Detail zoom
                 </Button>
               </Tip>
               <Tip label={`${GLOSSARY.exportPng} (E)`}>
@@ -694,9 +733,15 @@ export function App() {
             if (!transcode) {
               setTranscode(true)
               setTimeout(() => void audioRef.current?.play().catch(() => {}), 50)
+            } else {
+              setPlaying(false)
+              setPlayError("Playback failed: the browser cannot play this file and the server could not transcode it.")
             }
           }}
-          onPlay={() => setPlaying(true)}
+          onPlay={() => {
+            setPlayError(null)
+            setPlaying(true)
+          }}
           onPause={() => setPlaying(false)}
           onEnded={() => setPlaying(false)}
         />
@@ -792,7 +837,7 @@ function Shortcuts() {
     ["R / G", "references / grid"],
     ["1 2 3 4", "mix / L / R / side"],
     ["click", "seek"],
-    ["Z", "RED zoom"],
+    ["Z", "Detail zoom"],
     ["Backspace / U", "previous view"],
     ["H / O", "holes / rolloff overlay"],
     ["E", "export PNG"],

@@ -10,11 +10,17 @@ services:
       - /cache:size=256m,uid=1000,gid=1000
       - /tmp:size=64m,mode=1777
     ports:
-      # No authentication: keep it on loopback and put a reverse proxy,
-      # Tailscale serve or similar in front. Never publish it on 0.0.0.0.
+      # Without API_KEY there is no authentication: keep it on loopback and
+      # reach it over a VPN or an authenticating reverse proxy.
       - "127.0.0.1:4748:4748"
     environment:
       PCM_DISK_GB: "20"
+      # Before exposing it beyond loopback (README: "Exposing it beyond
+      # localhost"): require a key, serve it over HTTPS, and name the proxy
+      # so the brute-force lockout sees real client addresses.
+      # API_KEY_FILE: /run/secrets/sas_api_key
+      # TRUSTED_PROXIES: "172.18.0.0/16"
+    # secrets: [sas_api_key]
     volumes:
       - pcm:/pcm
       - /path/to/music:/library/music:ro
@@ -23,6 +29,11 @@ services:
       resources:
         limits:
           memory: 1536M
+          pids: 256
+
+# secrets:
+#   sas_api_key:
+#     file: ./secrets/sas_api_key   # openssl rand -hex 32 > secrets/sas_api_key
 
 volumes:
   pcm:

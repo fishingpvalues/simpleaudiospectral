@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { api, type Info, type Stft } from "@/lib/api"
 import { lut, overlayColor } from "@/lib/colormaps"
-import { fmtHz, fmtTime, freqTicks, fToY, RED_REFS, timeTicks, yToF, type View } from "@/lib/scale"
+import { activeRefs } from "@/lib/references"
+import { fmtHz, fmtTime, freqTicks, fToY, timeTicks, yToF, type View } from "@/lib/scale"
 import type { Settings } from "@/App"
 
 export const AXIS_W = 56
@@ -521,7 +522,7 @@ export function Viewer({
       g.setLineDash([2, 4])
       g.lineWidth = 1
       let lastLabel = -100
-      for (const r of RED_REFS) {
+      for (const r of activeRefs(settings.refSets)) {
         const f = r.khz * 1000
         if (f < view.f0 || f > view.f1) continue
         const y = Math.round(yOf(f)) + 0.5
@@ -897,7 +898,7 @@ export function Viewer({
   const fitAll = () => setView({ t0: 0, t1: dur, f0: 0, f1: nyq })
 
   // PNG of exactly what is on screen: title, ruler, waveform, spectrogram with
-  // overlays, Hz axis. This is the "zoomed spectral" a reviewer asks for.
+  // overlays, Hz axis: a zoomed spectrogram with its context.
   useEffect(() => {
     if (!registerExport) return
     registerExport(() => {

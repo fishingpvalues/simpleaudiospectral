@@ -85,13 +85,3 @@ export function fmtBytes(n: number): string {
   if (n > 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MiB`
   return `${(n / 1024).toFixed(0)} KiB`
 }
-
-/** Lowpass references from RED's spectral guide. */
-export const RED_REFS: { khz: number; label: string }[] = [
-  { khz: 16, label: "128" },
-  { khz: 18.5, label: "V2" },
-  { khz: 19, label: "192" },
-  { khz: 19.5, label: "V0" },
-  { khz: 20, label: "256" },
-  { khz: 20.5, label: "320" },
-]

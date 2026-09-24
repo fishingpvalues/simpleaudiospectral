@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react"
 import { AlertTriangle, CheckCircle2, Download, XCircle } from "lucide-react"
 import { api, type Info, type Stats } from "@/lib/api"
 import { palette } from "@/lib/colormaps"
-import { fmtBytes, fmtHz, fmtTime, RED_REFS, type View } from "@/lib/scale"
+import { activeRefs, type RefLine } from "@/lib/references"
+import { fmtBytes, fmtHz, fmtTime, type View } from "@/lib/scale"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -18,11 +19,6 @@ const LEVEL = {
   warn: { label: "Check manually", icon: AlertTriangle, variant: "warning" as const },
   bad: { label: "Suspect transcode", icon: XCircle, variant: "destructive" as const },
 }
-
-const TABLE = [
-  { khz: 22, label: "CD / lossless" },
-  ...[...RED_REFS].reverse().map(r => ({ khz: r.khz, label: `MP3 ${r.label}` })),
-]
 
 type Spec = { hz: Float32Array; db: Float32Array } | null
 
@@ -41,7 +37,11 @@ export function Analysis({ info, cursor, settings, soxFull, soxZoom, view, viewS
   const a = info.analysis
   const lv = a ? LEVEL[a.level] : LEVEL.warn
   const khz = a?.cutoffHz ? a.cutoffHz / 1000 : null
-  const match = khz === null ? 22 : TABLE.reduce((b, r) => (Math.abs(r.khz - khz) < Math.abs(b.khz - khz) ? r : b)).khz
+  const refs = activeRefs(settings.refSets)
+  const TABLE: RefLine[] = [...refs].reverse().concat({ khz: 22, label: "No lowpass (lossless)" })
+  // Nearest by the measured cut-off of each setting, which is what the analyser reports.
+  const near = (r: RefLine) => Math.abs((r.at ?? r.khz) - (khz ?? 22))
+  const match = khz === null ? TABLE[TABLE.length - 1] : TABLE.reduce((b, r) => (near(r) < near(b) ? r : b))
   const padded = info.bitDepthUsed && /^16\/(24|32)/.test(info.bitDepthUsed)
   const mono = a && a.sideDb < -60
 
@@ -122,15 +122,15 @@ export function Analysis({ info, cursor, settings, soxFull, soxZoom, view, viewS
 
         <div>
           <h3 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            <Term term="refs">Lowpass reference (RED guide)</Term>
+            <Term term="refs">Encoder lowpass reference</Term>
           </h3>
           <div className="overflow-hidden rounded-md border text-sm">
             {TABLE.map(r => (
               <div
-                key={r.khz}
+                key={r.label}
                 className={cn(
                   "flex justify-between px-3 py-1.5 font-mono",
-                  r.khz === match ? "bg-primary text-primary-foreground" : "odd:bg-card",
+                  r === match ? "bg-primary text-primary-foreground" : "odd:bg-card",
                 )}
               >
                 <span>{r.label}</span>
@@ -142,7 +142,7 @@ export function Analysis({ info, cursor, settings, soxFull, soxZoom, view, viewS
 
         <div>
           <h3 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">Frequency analysis</h3>
-          <SpectrumChart info={info} cursor={cursor} viewSpec={viewSpec} />
+          <SpectrumChart info={info} cursor={cursor} viewSpec={viewSpec} refs={refs} />
           <p className="mt-1.5 text-xs text-muted-foreground">
             Light grey: loudest 10% of frames (shows the lowpass). Dark grey: median frame (shows a 16 kHz shelf). Cyan:
             mean of the visible view. White: the column under the cursor.
@@ -181,7 +181,7 @@ export function Analysis({ info, cursor, settings, soxFull, soxZoom, view, viewS
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            1800x1025, Kaiser, 120 dB - the classic sox spectral uploaders post.
+            1800x1025, Kaiser window, 120 dB range: the widely used SoX spectrogram format.
           </p>
         </div>
       </div>
@@ -215,7 +215,17 @@ function ColorBar({ cmap }: { cmap: string }) {
   return <canvas ref={ref} className="h-3 w-full rounded-sm [image-rendering:pixelated]" aria-hidden="true" />
 }
 
-function SpectrumChart({ info, cursor, viewSpec }: { info: Info; cursor: Cursor | null; viewSpec: Spec }) {
+function SpectrumChart({
+  info,
+  cursor,
+  viewSpec,
+  refs,
+}: {
+  info: Info
+  cursor: Cursor | null
+  viewSpec: Spec
+  refs: RefLine[]
+}) {
   const ref = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const c = ref.current
@@ -253,7 +263,7 @@ function SpectrumChart({ info, cursor, viewSpec }: { info: Info; cursor: Cursor 
       g.fillText(fmtHz(f), X(f) - 6, h - 3)
     }
     g.setLineDash([2, 3])
-    for (const r of RED_REFS) {
+    for (const r of refs) {
       if (r.khz * 1000 > nyq) continue
       g.strokeStyle = "rgba(255,255,255,0.18)"
       g.beginPath()
@@ -326,7 +336,7 @@ function SpectrumChart({ info, cursor, viewSpec }: { info: Info; cursor: Cursor 
       g.lineTo(X(cursor.f), h - B)
       g.stroke()
     }
-  }, [info, cursor, viewSpec])
+  }, [info, cursor, viewSpec, refs])
   const a = info.analysis
   return (
     <canvas

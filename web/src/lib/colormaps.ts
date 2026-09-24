@@ -1,11 +1,10 @@
 // 256-entry RGBA lookup tables. "audition" follows Adobe Audition's spectral
-// display (black - violet - red - orange - yellow - white), which is what the
-// RED guide's screenshots use; "spek" follows Spek.
+// display (black - violet - red - orange - yellow - white); "spek" follows Spek.
 type Stop = [number, string]
 
 const MAPS: Record<string, Stop[]> = {
-  // Adobe Audition's spectral frequency display, matched against the RED
-  // guide's Audition CS6 screenshots: black floor, indigo/violet low energy,
+  // Adobe Audition's spectral frequency display, matched against Audition CS6
+  // screenshots: black floor, indigo/violet low energy,
   // magenta-red mids, orange-yellow peaks, white only at the very top.
   audition: [
     [0, "#000000"],

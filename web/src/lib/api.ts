@@ -133,8 +133,28 @@ const q = (o: Record<string, string | number>) =>
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join("&")
 
-async function json<T>(url: string, signal?: AbortSignal): Promise<T> {
+/** Fired when the server wants the API key (401); the AuthGate shows the login. */
+export const UNAUTHORIZED = "sas:unauthorized"
+
+async function get(url: string, signal?: AbortSignal): Promise<Response> {
   const r = await fetch(url, { signal })
+  if (r.status === 401) {
+    window.dispatchEvent(new Event(UNAUTHORIZED))
+    throw new Error("API key required")
+  }
+  return r
+}
+
+export interface Health {
+  status: string
+  version: string
+  indexed: boolean
+  auth: boolean
+  authenticated: boolean
+}
+
+async function json<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const r = await get(url, signal)
   const body = await r.json()
   if (!r.ok) throw new Error(body.error ?? r.statusText)
   return body as T
@@ -149,7 +169,7 @@ export interface Progress {
  * with its stage until the result is ready. */
 async function poll<T>(url: string, signal?: AbortSignal, onProgress?: (p: Progress) => void): Promise<T> {
   for (;;) {
-    const r = await fetch(url, { signal })
+    const r = await get(url, signal)
     const body = await r.json()
     if (r.status === 202) {
       onProgress?.(body as Progress)
@@ -168,6 +188,22 @@ async function poll<T>(url: string, signal?: AbortSignal, onProgress?: (p: Progr
 }
 
 export const api = {
+  health: () => fetch("/api/health").then(r => r.json() as Promise<Health>),
+  /** Exchanges the key for an HttpOnly session cookie; false when the key is wrong. */
+  async login(key: string): Promise<boolean> {
+    const r = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    })
+    if (r.status === 401) return false
+    if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText)
+    return true
+  },
+  async logout() {
+    await fetch("/api/logout", { method: "POST" })
+    window.dispatchEvent(new Event(UNAUTHORIZED))
+  },
   ls: (path: string) => json<Listing>(`/api/ls?${q({ path })}`),
   roots: () => json<{ roots: Root[]; indexed: boolean; entries: number }>("/api/roots"),
   search: (query: string, signal?: AbortSignal) =>
@@ -177,13 +213,13 @@ export const api = {
   stats: (path: string, signal?: AbortSignal, onProgress?: (p: Progress) => void) =>
     poll<Stats>(`/api/stats?${q({ path })}`, signal, onProgress),
   async stft(p: Record<string, string | number>, signal?: AbortSignal): Promise<Stft> {
-    const r = await fetch(`/api/stft?${q(p)}`, { signal })
+    const r = await get(`/api/stft?${q(p)}`, signal)
     if (!r.ok) throw new Error((await r.json()).error ?? r.statusText)
     const meta = JSON.parse(r.headers.get("X-Meta") ?? "{}") as StftMeta
     return { meta, data: new Uint8Array(await r.arrayBuffer()) }
   },
   async wave(p: Record<string, string | number>, signal?: AbortSignal): Promise<Float32Array> {
-    const r = await fetch(`/api/wave?${q(p)}`, { signal })
+    const r = await get(`/api/wave?${q(p)}`, signal)
     if (!r.ok) throw new Error(r.statusText)
     return new Float32Array(await r.arrayBuffer())
   },
@@ -192,14 +228,14 @@ export const api = {
     p: Record<string, string | number>,
     signal?: AbortSignal,
   ): Promise<{ size: number; correlation: number; data: Uint8Array }> {
-    const r = await fetch(`/api/gonio?${q(p)}`, { signal })
+    const r = await get(`/api/gonio?${q(p)}`, signal)
     if (!r.ok) throw new Error(r.statusText)
     const meta = JSON.parse(r.headers.get("X-Meta") ?? "{}")
     return { ...meta, data: new Uint8Array(await r.arrayBuffer()) }
   },
   /** Streams one row per track as the server finishes it. */
   async scan(path: string, onTotal: (n: number) => void, onRow: (r: ScanRow) => void, signal?: AbortSignal) {
-    const r = await fetch(`/api/scan?${q({ path })}`, { signal })
+    const r = await get(`/api/scan?${q({ path })}`, signal)
     if (!r.ok || !r.body) throw new Error(r.statusText)
     const reader = r.body.getReader(),
       dec = new TextDecoder()
