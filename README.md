@@ -1,5 +1,7 @@
 # simpleaudiospectral
 
+**Fake FLAC detector and spectrogram viewer for lossless audio: find MP3/AAC transcodes, upsampled hi-res and padded bit depth, self-hosted in Docker.**
+
 [![CI](https://github.com/fishingpvalues/simpleaudiospectral/actions/workflows/ci.yml/badge.svg)](https://github.com/fishingpvalues/simpleaudiospectral/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/fishingpvalues/simpleaudiospectral/badges/coverage.json)](https://github.com/fishingpvalues/simpleaudiospectral/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/fishingpvalues/simpleaudiospectral/badge)](https://scorecard.dev/viewer/?uri=github.com/fishingpvalues/simpleaudiospectral)
@@ -14,9 +16,13 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 simpleaudiospectral is a self-hosted web application for checking whether
-audio files are what they claim to be. It shows a spectrogram, waveform and
-loudness analysis of any track in a mounted music library, and flags lossy
-transcodes, upsampled "hi-res" files, padded bit depths and clipped masters.
+audio files are what they claim to be. Point it at a music library and it
+shows a spectrogram, waveform and loudness analysis of any track, and flags
+**fake lossless** files: FLAC, WAV or ALAC that were made from an MP3, AAC,
+Opus or Vorbis file, "hi-res" 96/192 kHz files upsampled from CD, 24-bit
+files padded from 16-bit, and clipped masters. It names the likely source
+codec and bitrate (for example "MP3 V2/192k"), scans whole albums at once,
+and runs in the browser on any device, with an HTTP API for scripts.
 
 Its checks rest on encoder source code and published research on
 fake-lossless detection, not on rules of thumb, which makes it usable for
@@ -24,7 +30,8 @@ the spectral reviews that curated lossless communities such as RED expect.
 The viewer draws a zoomable spectrogram in the style of Adobe Audition, and
 the tool exports the widely used SoX spectrogram image.
 
-Licensed under the MIT license. See [LICENSE](LICENSE).
+Licensed under the MIT license. See [LICENSE](LICENSE). If it saves you
+time, a star on GitHub helps other people find it.
 
 ![Overview: a genuine lossless track](docs/overview.png)
 
@@ -35,6 +42,8 @@ Licensed under the MIT license. See [LICENSE](LICENSE).
 - [Configuration](#configuration)
 - [How the verdict is reached](#how-the-verdict-is-reached)
 - [Reference lines](#reference-lines)
+- [Compared with other tools](#compared-with-other-tools)
+- [FAQ](#faq)
 - [Keyboard shortcuts](#keyboard-shortcuts)
 - [Accessibility](#accessibility)
 - [HTTP API](#http-api)
@@ -415,6 +424,72 @@ The round figures quoted in many spectral-check guides (16, 18.5, 19, 19.5,
 20 and 20.5 kHz) are available as the optional "Rule-of-thumb values" set.
 They are off by default: they differ from the encoder data by up to 1 kHz,
 and "V0 at 19.5 kHz" only holds for LAME 3.98 and older.
+
+## Compared with other tools
+
+| | simpleaudiospectral | Spek | Fakin' The Funk | Lossless Audio Checker |
+|---|---|---|---|---|
+| Runs as | web app (Docker), any device | desktop app | Windows app | desktop / command line |
+| Open source | yes (MIT) | yes (GPL) | no | no |
+| Spectrogram viewer | zoomable, per channel, overlays | yes | yes | no |
+| Automatic verdict and likely codec | yes | no | yes | yes |
+| Whole-album scan | yes | no | yes | yes |
+| Loudness, DR, clipping, bit depth | yes | no | no | no |
+| HTTP API | yes | no | no | no |
+
+The other tools are good at what they do; this one is for a library on a
+server or NAS that you want to check from a browser, with the evidence for
+each verdict on screen.
+
+## FAQ
+
+### How do I check if a FLAC file is fake or a transcode?
+
+Open it. A lossy encoder cuts everything above a fixed frequency in every
+frame, which shows as a flat edge in the spectrogram; genuine CD audio
+reaches 22 kHz with a soft roll-off. The analysis panel names the edge
+("brick wall at 18.8 kHz: looks like MP3 V2/192k") and the reference lines
+show which encoder settings end there. Use Scan on a folder to check a whole
+album.
+
+### Can it tell MP3 from AAC or Opus at the same cut-off?
+
+Usually. LAME codes the band above 16 kHz only when bits are left over, so
+its level jumps from frame to frame (HF variability above 13 dB), while AAC,
+Opus and Vorbis keep it steady. Opus always ends at 20 kHz, its fullband
+limit.
+
+### What can it not detect?
+
+A transcode from a lossy file without a lowpass: FFmpeg AAC at 256 kbps and
+up, Vorbis q6 and up, and LAME V0 since 3.99 reach close to 22 kHz. Use the
+spectral holes overlay and your ears for those. A master can also be band
+limited on purpose (some old CDs stop near 16 kHz); a master rolls off
+softly, a codec edge is flat.
+
+### How do I detect fake hi-res (upsampled 24/96 or 24/192)?
+
+The analysis compares the band above 24 kHz with the audible band; an
+upsampled file has nothing up there, and the tool reports the rate it was
+probably resampled from. Padded bit depth shows in the bit-usage histogram:
+a 16-bit master in a 24-bit file leaves the low 8 bits at zero.
+
+### Does it upload or modify my music?
+
+No. Everything runs on your server, the library is mounted read-only, and
+the page loads nothing from third-party hosts.
+
+### Is it safe to expose on the internet?
+
+With `API_KEY` set and HTTPS in front, yes; see
+[Exposing it beyond localhost](#exposing-it-beyond-localhost) and
+[Security](#security).
+
+### Is it good enough for private music trackers' spectral checks?
+
+It produces the usual evidence (full and zoomed spectrograms, the SoX
+spectrogram image, cut-off and codec estimate), based on encoder data rather
+than rules of thumb. Each community's own rules still decide.
 
 ## Keyboard shortcuts
 

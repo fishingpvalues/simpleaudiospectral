@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "simpleaudiospectral: spectral analysis for verifying lossless audio"
+abstract: >-
+  Self-hosted web application that detects fake lossless audio (lossy
+  transcodes, upsampled hi-res, padded bit depth) from the spectrogram, names
+  the likely source codec from encoder lowpass data, and measures loudness,
+  true peak and dynamic range.
+authors:
+  - alias: fishingpvalues
+type: software
+license: MIT
+repository-code: "https://github.com/fishingpvalues/simpleaudiospectral"
+keywords:
+  - fake lossless detection
+  - transcode detection
+  - spectrogram
+  - FLAC
+  - lossy compression detection
+  - audio forensics

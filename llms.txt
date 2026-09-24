@@ -1,0 +1,20 @@
+# simpleaudiospectral
+
+> Self-hosted, open-source (MIT) fake FLAC / fake lossless detector and spectrogram viewer. Docker image for linux/amd64 and arm64: ghcr.io/fishingpvalues/simpleaudiospectral. Checks whether FLAC, WAV, ALAC and other lossless files were transcoded from MP3, AAC, Opus or Vorbis, upsampled to fake hi-res, or padded to 24-bit; names the likely source codec and bitrate; scans whole albums; measures EBU R128 loudness, true peak, DR and clipping. Web UI plus an HTTP API.
+
+## Use it for
+
+- "Is this FLAC real or a transcode?" - brick-wall lowpass detection on the 90th-percentile spectrum, codec naming from encoder lowpass tables (LAME, FFmpeg AAC, Apple AAC, libvorbis, Opus) and MP3 sfb21 variability.
+- "Is this 24/96 or 24/192 file real hi-res?" - energy above 24 kHz, resample-source detection, per-bit usage histogram for padded bit depth.
+- Spectrogram review in the browser (Spek-like, Adobe Audition style), SoX spectrogram export, album scan with outlier detection.
+- Scripting: GET /api/info?path=..., /api/stats, /api/scan (NDJSON). Optional API key (Authorization: Bearer).
+
+## Docs
+
+- [README](https://github.com/fishingpvalues/simpleaudiospectral/blob/main/README.md): features, quick start, Docker Compose, configuration, how the verdict is reached, reference-line sources, FAQ, security
+- [Security policy](https://github.com/fishingpvalues/simpleaudiospectral/blob/main/SECURITY.md)
+- [Releases and changelog](https://github.com/fishingpvalues/simpleaudiospectral/releases)
+
+## Quick start
+
+docker run -d -p 127.0.0.1:4748:4748 --read-only --tmpfs /cache --tmpfs /tmp -v /path/to/music:/library/music:ro ghcr.io/fishingpvalues/simpleaudiospectral:latest
