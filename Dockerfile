@@ -5,7 +5,7 @@
 # included, is bundled into web/dist; the page loads nothing from a CDN. It
 # runs on the BUILD platform: the output is static files, so a multi-arch
 # build does not emulate Node under QEMU.
-# Stage 2 is the API: numpy does the DSP (installed from uv.lock), ffmpeg
+# Stage 2 is the API (src/simpleaudiospectral): numpy does the DSP (installed from uv.lock), ffmpeg
 # decodes any format, SoX renders the exportable spectral PNG.
 FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 WORKDIR /web
@@ -46,9 +46,10 @@ RUN uv sync --frozen --no-dev --no-install-project \
 RUN mkdir -p /pcm && chown 1000:1000 /pcm
 VOLUME ["/pcm"]
 
-COPY app.py dsp.py ./
+COPY src/ ./src/
 COPY --from=web /web/dist ./web
-ENV APP_VERSION=${VERSION}
+# The package runs from source: no wheel build, so no build backend in the image.
+ENV APP_VERSION=${VERSION} PYTHONPATH=/app/src WEB_DIR=/app/web
 # glibc keeps freed memory in per-thread arenas; with numpy worker threads that
 # grew the heap until it crowded out the page cache the memory-mapped PCM
 # relies on (and, at FFT 32768, into an OOM). Two arenas and a fixed mmap
@@ -60,4 +61,4 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=15s --retries=3 \
     CMD ["wget", "-q", "-T", "8", "-O", "/dev/null", "http://127.0.0.1:4748/api/health"]
 
 USER 1000:1000
-CMD ["python3", "/app/app.py"]
+CMD ["python3", "-m", "simpleaudiospectral"]

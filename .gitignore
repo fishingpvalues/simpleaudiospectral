@@ -8,3 +8,6 @@ web/*.tsbuildinfo
 !docs/*.png
 .coverage
 coverage.json
+web/test-results/
+web/playwright-report/
+web/coverage/

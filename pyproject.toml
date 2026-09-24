@@ -1,31 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "simpleaudiospectral"
 version = "0.0.4"
-description = "Spectral analysis for verifying lossless audio"
+description = "Fake FLAC detector and spectrogram viewer for lossless audio"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
+authors = [{ name = "fishingpvalues" }]
+keywords = ["audio", "flac", "spectrogram", "transcode-detection", "lossless", "ebu-r128"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Typing :: Typed",
+]
 dependencies = [
     "numpy>=2.3,<3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/fishingpvalues/simpleaudiospectral"
+Repository = "https://github.com/fishingpvalues/simpleaudiospectral"
+Issues = "https://github.com/fishingpvalues/simpleaudiospectral/issues"
+Changelog = "https://github.com/fishingpvalues/simpleaudiospectral/blob/main/CHANGELOG.md"
+
+[project.scripts]
+simpleaudiospectral = "simpleaudiospectral.server.app:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8.4",
     "pytest-cov>=7.1.0",
     "ruff>=0.13",
+    "ty>=0.0.14",
 ]
 
-[tool.uv]
-package = false
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
+[tool.hatch.build.targets.wheel]
+packages = ["src/simpleaudiospectral"]
 
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+src = ["src", "tests"]
 extend-exclude = ["web"]
 
 [tool.ruff.lint]
@@ -38,6 +63,9 @@ select = [
     "SIM",      # simplify
     "S",        # bandit (security)
     "PL",       # pylint subset
+    "C4",       # comprehensions
+    "TC",       # imports only needed for type checking
+    "ERA",      # commented-out code
     "RUF",
 ]
 ignore = [
@@ -48,8 +76,38 @@ ignore = [
     "PLR0917",        # DSP entry points take the viewport as positional args
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["simpleaudiospectral"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S108", "PLC0415", "S310"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+# Tests index results that may be None in general but not for their input.
+[[tool.ty.overrides]]
+include = ["tests/**"]
+
+[tool.ty.overrides.rules]
+not-subscriptable = "ignore"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = ["-ra", "-q", "--strict-markers", "--strict-config"]
+
+[tool.coverage.run]
+source = ["src/simpleaudiospectral"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "if __name__ == .__main__.:"]
+show_missing = true
+skip_covered = true

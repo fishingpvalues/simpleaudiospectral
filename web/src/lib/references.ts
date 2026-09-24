@@ -101,3 +101,16 @@ export function activeRefs(ids: RefSetId[]): RefLine[] {
     .flatMap(s => s.lines)
     .sort((a, b) => a.khz - b.khz)
 }
+
+/** Row the analysis panel adds under the encoder lines. */
+export const LOSSLESS_ROW: RefLine = { khz: 22, label: "No lowpass (lossless)" }
+
+/** The analysis panel's reference table, highest first, and the row that
+ * matches the detected cut-off (in kHz; null = no lowpass found). */
+export function lowpassTable(refs: RefLine[], cutoffKhz: number | null): { rows: RefLine[]; match: RefLine } {
+  const rows = [...refs].reverse().concat(LOSSLESS_ROW)
+  // Nearest by the measured cut-off of each setting, which is what the analyser reports.
+  const near = (r: RefLine) => Math.abs((r.at ?? r.khz) - (cutoffKhz ?? 22))
+  const match = cutoffKhz === null ? rows[rows.length - 1] : rows.reduce((b, r) => (near(r) < near(b) ? r : b))
+  return { rows, match }
+}

@@ -1,28 +1,43 @@
-.PHONY: help check lint format test web typecheck dev build run hooks-install
+.PHONY: help install check verify fix type-check test test-cov e2e web dev build run hooks-install
 
 help:            ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
 
-check: lint test ## everything CI runs, except the image build
+install:         ## Python and web dependencies
+	uv sync
+	cd web && npm ci --no-audit --no-fund
 
-lint:            ## ruff, prettier, eslint, tsc
+check: verify test ## everything CI runs, except the image build and e2e
+
+verify:          ## lint, format check and type check, changing nothing
 	uv run ruff format --check .
 	uv run ruff check .
-	cd web && npm run format:check && npm run lint && npx tsc -b
+	uv run ty check
+	cd web && npm run format:check && npm run lint && npm run typecheck && npm test
 
-format:          ## rewrite Python and web sources in place
+fix:             ## rewrite Python and web sources in place
 	uv run ruff format .
 	uv run ruff check --fix .
 	cd web && npm run format
 
+type-check:      ## ty (Python) and tsc (web)
+	uv run ty check
+	cd web && npm run typecheck
+
 test:            ## DSP and HTTP tests (need ffmpeg and sox)
 	uv run pytest
+
+test-cov:        ## tests with branch coverage
+	uv run pytest --cov --cov-report=term-missing
+
+e2e: web         ## browser tests: the built UI against a generated library
+	cd web && npx playwright test
 
 web:             ## build the UI into web/dist
 	cd web && npm ci --no-audit --no-fund && npm run build
 
 dev:             ## API on :4748 against ./library, Vite on :5173
-	LIBRARY_ROOT=$${LIBRARY_ROOT:-./library} WEB_DIR=web/dist uv run app.py & api=$$!; \
+	LIBRARY_ROOT=$${LIBRARY_ROOT:-./library} WEB_DIR=web/dist uv run simpleaudiospectral & api=$$!; \
 	trap 'kill $$api 2>/dev/null' EXIT; cd web && npm run dev
 
 build:           ## container image

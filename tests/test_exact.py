@@ -8,42 +8,29 @@ rounding (rtol 1e-12) where a whole-file sum is accumulated in a different
 order.
 """
 
-import importlib
 import math
-import os
 import subprocess
-import sys
 
 import numpy as np
 import pytest
 from numpy.lib.stride_tricks import sliding_window_view
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from simpleaudiospectral import dsp, pcm
+from simpleaudiospectral.analysis import analyse_pcm, bit_usage, dynamics, lowpass, quiet_floor
+from simpleaudiospectral.analysis.passes import measure
 
 SR = 8000
 SECONDS = 40
 
 
-@pytest.fixture(scope="module")
-def mods(tmp_path_factory):
-    os.environ["LIBRARY_ROOT"] = str(tmp_path_factory.mktemp("lib"))
-    os.environ["CACHE_DIR"] = str(tmp_path_factory.mktemp("cache"))
-    import app as app_mod
-    import dsp as dsp_mod
-
-    return importlib.reload(dsp_mod), importlib.reload(app_mod)
-
-
 @pytest.fixture
-def small_chunks(mods, monkeypatch, tmp_path):
+def small_chunks(library, monkeypatch, tmp_path):
     """An awkward chunk size (not a multiple of any frame or hop) and forced
     spilling to disk, so every chunk seam and the memmap path are exercised."""
-    dsp, app = mods
-    monkeypatch.setattr(dsp, "CHUNK", 30011)
-    monkeypatch.setattr(dsp, "SPILL_RAM_BYTES", 0)
-    monkeypatch.setattr(dsp, "SPILL_DIR", str(tmp_path))
-    monkeypatch.setattr(dsp, "STFT_GROUP_BYTES", 257 * 8 * 5)  # 5 columns per group at FFT 512
-    return dsp, app
+    monkeypatch.setattr(dsp.core, "CHUNK", 30011)
+    monkeypatch.setattr(dsp.core, "SPILL_RAM_BYTES", 0)
+    monkeypatch.setattr(dsp.core, "SPILL_DIR", str(tmp_path))
+    monkeypatch.setattr(dsp.core, "STFT_GROUP_BYTES", 257 * 8 * 5)  # 5 columns per group at FFT 512
 
 
 def signal(seed=0):
@@ -71,7 +58,6 @@ def ref_loud(fr):
 
 
 def test_spectrum_percentiles_identical(small_chunks):
-    dsp, _ = small_chunks
     x, _ = signal()
     n, hop = 1024, 512
     fr = ref_frames(x, n, hop)
@@ -86,7 +72,6 @@ def test_spectrum_percentiles_identical(small_chunks):
 
 
 def test_band_ratio_std_identical(small_chunks):
-    dsp, _ = small_chunks
     x, _ = signal(1)
     n, hop = 256, 128
     fr = ref_frames(x, n, hop)
@@ -101,7 +86,6 @@ def test_band_ratio_std_identical(small_chunks):
 
 
 def test_mean_power_spectrum_matches(small_chunks):
-    dsp, _ = small_chunks
     x, _ = signal(2)
     n = 4096
     fr = ref_frames(x, n, n // 2)
@@ -119,7 +103,6 @@ def ref_runs(x, level, equal=False):
 
 
 def test_summary_blocks_and_runs_identical(small_chunks):
-    dsp, _ = small_chunks
     left, right = signal(3)
     sm = dsp.summarize(left, right, SR)
     L, R = left.astype(np.float64), right.astype(np.float64)
@@ -142,7 +125,6 @@ def test_summary_blocks_and_runs_identical(small_chunks):
 
 
 def test_count_runs_across_every_seam(small_chunks):
-    dsp, _ = small_chunks
     x = np.zeros(200000, np.float32)
     for a in range(29995, 200000, 30011):  # runs straddling each chunk seam
         x[a : a + 30] = 0.5
@@ -175,7 +157,6 @@ def ref_clicks(x, sr, window_s=60):
 
 
 def test_isolated_clicks_identical(small_chunks):
-    dsp, _ = small_chunks
     rng = np.random.default_rng(4)
     x = (0.01 * rng.standard_normal(SR * 130)).astype(np.float32)
     x[:: SR // 3] += 0.7
@@ -183,7 +164,6 @@ def test_isolated_clicks_identical(small_chunks):
 
 
 def test_stft_columns_every_frame(small_chunks):
-    dsp, _ = small_chunks
     x, _ = signal(5)
     fft, cols = 512, 37
     t0, t1 = 3.3, 31.7
@@ -215,7 +195,6 @@ def test_stft_columns_every_frame(small_chunks):
 
 
 def test_goniometer_identical(small_chunks):
-    dsp, _ = small_chunks
     left, right = signal(6)
     L, R = left.astype(np.float64), right.astype(np.float64)
     m, s = (L + R) / 2, (L - R) / 2
@@ -227,9 +206,8 @@ def test_goniometer_identical(small_chunks):
 
 
 def test_dr_and_quiet_floor_identical(small_chunks):
-    _, app = small_chunks
     left, right = signal(7)
-    got = app.dynamics(left, right, SR)
+    got = dynamics(left, right, SR)
     drs = []
     for x in (left, right):
         blk = 3 * SR
@@ -251,16 +229,14 @@ def test_dr_and_quiet_floor_identical(small_chunks):
     nb = len(mix) // blk
     r = np.sqrt((mix[: nb * blk].reshape(nb, blk) ** 2).mean(1))
     ref_floor = round(float(20 * np.log10(np.percentile(r[r > 1e-9], 5))), 1)
-    assert app.quiet_floor(None, SR, dsp_summary(small_chunks, left, right)) == ref_floor
+    assert quiet_floor(None, SR, dsp_summary(small_chunks, left, right)) == ref_floor
 
 
 def dsp_summary(small_chunks, left, right):
-    dsp, _ = small_chunks
     return dsp.summarize(left, right, SR)
 
 
 def test_bit_usage_counts_every_sample(small_chunks, tmp_path):
-    _, app = small_chunks
     f = tmp_path / "t.flac"
     subprocess.run(
         [
@@ -287,12 +263,11 @@ def test_bit_usage_counts_every_sample(small_chunks, tmp_path):
     v = np.frombuffer(raw, np.int32)
     u = (v >> 16).astype(np.int64) & 0xFFFF
     ref = [round(int(np.count_nonzero((u >> i) & 1)) / len(v), 6) for i in range(16)]
-    got = app.bit_usage(str(f), 16)
+    got = bit_usage(str(f), 16)
     assert got["samples"] == len(v) and got["ones"] == ref
 
 
 def test_column_extremes_identical(small_chunks):
-    dsp, _ = small_chunks
     x, _ = signal(8)
     B = 512
     idx = dsp.feed_all(x, dsp.BlockExtremes(B))[0]
@@ -307,7 +282,6 @@ def test_column_extremes_identical(small_chunks):
 def test_pipeline_equals_direct_functions(small_chunks, tmp_path, monkeypatch):
     """run_analysis (three shared sequential passes) must give exactly what the
     direct whole-signal functions give."""
-    dsp, app = small_chunks
     lib = tmp_path / "lib"
     lib.mkdir()
     f = lib / "t.flac"
@@ -328,17 +302,16 @@ def test_pipeline_equals_direct_functions(small_chunks, tmp_path, monkeypatch):
         ],
         check=True,
     )
-    monkeypatch.setattr(app, "ROOT", str(lib))
-    monkeypatch.setattr(app.PCM, "dir", str(tmp_path))
-    res = app._run(str(f), *app.PCM.open(str(f)))
-    mix, sr = app.PCM.get(str(f), "mix")
-    side, _ = app.PCM.get(str(f), "side")
-    left, _ = app.PCM.get(str(f), "left")
-    right, _ = app.PCM.get(str(f), "right")
+    monkeypatch.setattr(pcm.PCM, "dir", str(tmp_path))
+    res = measure(str(f), *pcm.PCM.open(str(f)), progress=lambda stage, done: None)
+    mix, sr = pcm.PCM.get(str(f), "mix")
+    side, _ = pcm.PCM.get(str(f), "side")
+    left, _ = pcm.PCM.get(str(f), "left")
+    right, _ = pcm.PCM.get(str(f), "right")
     sm = dsp.summarize(left, right, sr)
-    direct = app.analyse_pcm(mix, side, sr, summary=sm)
+    direct = analyse_pcm(mix, side, sr, summary=sm)
     assert res["analysis"] == direct
-    assert res["stats"]["dynamics"] == app.dynamics(left, right, sr, sm)
+    assert res["stats"]["dynamics"] == dynamics(left, right, sr, sm)
     for ch in ("left", "right", "side"):
-        (p90,), _ = dsp.spectrum_percentiles(app.PCM.get(str(f), ch)[0], sr, qs=(90,))
-        assert res["stats"]["channelCutoffs"][ch] == app.lowpass(p90, None, sr)["cutoff_hz"]
+        (p90,), _ = dsp.spectrum_percentiles(pcm.PCM.get(str(f), ch)[0], sr, qs=(90,))
+        assert res["stats"]["channelCutoffs"][ch] == lowpass(p90, None, sr)["cutoff_hz"]

@@ -448,7 +448,7 @@ each verdict on screen.
 Open it. A lossy encoder cuts everything above a fixed frequency in every
 frame, which shows as a flat edge in the spectrogram; genuine CD audio
 reaches 22 kHz with a soft roll-off. The analysis panel names the edge
-("brick wall at 18.8 kHz: looks like MP3 V2/192k") and the reference lines
+("Lowpass at 18.8 kHz, 49 dB drop: MP3 V2/192k.") and the reference lines
 show which encoder settings end there. Use Scan on a folder to check a whole
 album.
 
@@ -566,32 +566,36 @@ curl -sN 'http://127.0.0.1:4748/api/scan?path=music/Artist/Album'
 
 ## Development
 
-The backend is two Python modules (`app.py` for HTTP and orchestration,
-`dsp.py` for the measurements) using numpy, ffmpeg and SoX, managed with
-[uv](https://docs.astral.sh/uv/). The frontend is React, TypeScript, Vite and
-Tailwind CSS with Radix-based components. Everything is bundled into the
-image, fonts included, so the page loads nothing from third-party hosts.
+The backend is the Python package `src/simpleaudiospectral` (numpy, ffmpeg
+and SoX), managed with [uv](https://docs.astral.sh/uv/) in the layout of
+[copier-astral](https://github.com/ritwiktiwari/copier-astral). The frontend
+in `web/` is React, TypeScript, Vite and Tailwind CSS with Radix-based
+components. Everything is bundled into the image, fonts included, so the page
+loads nothing from third-party hosts. [CONTRIBUTING.md](CONTRIBUTING.md) maps
+the code and says where a change goes.
 
 ```sh
-uv sync                 # Python dependencies from uv.lock
+make install            # uv sync and npm ci
 make web                # build the UI into web/dist
 make dev                # API on :4748 against ./library, Vite dev server on :5173
-make check              # ruff, prettier, eslint, tsc and the test suite
+make verify             # ruff, ty, prettier, eslint, tsc and vitest, changing nothing
+make test               # pytest: DSP, analysis, HTTP and auth (needs ffmpeg and sox)
+make e2e                # Playwright: the built UI in a browser against a generated library
+make fix                # format and autofix everything
 make hooks-install      # lefthook: format on commit, Conventional Commits, check on push
 ```
 
-The tests need `ffmpeg` and `sox` on the path. They generate their own audio
-and need no network.
+The tests generate their own audio and need no network.
 
 | Area | Tool |
 |---|---|
-| Python dependencies | uv |
-| Python lint and format | ruff |
-| Python tests | pytest, coverage via pytest-cov |
-| Web lint | eslint (typescript-eslint, react-hooks, jsx-a11y) |
-| Web format | prettier with the Tailwind plugin |
+| Python dependencies and build | uv, hatchling |
+| Python lint, format, types | ruff, ty |
+| Python tests | pytest, branch coverage via pytest-cov |
+| Web lint, format, types | eslint (typescript-eslint, react-hooks, jsx-a11y), prettier, tsc |
+| Web tests | vitest (units), Playwright (end to end) |
 | Container | hadolint, Trivy, multi-arch buildx, SBOM and provenance attestations |
-| Supply chain | actions pinned by commit, OpenSSF Scorecard |
+| Supply chain | actions pinned by commit, OpenSSF Scorecard, gitleaks |
 | Dependencies | Renovate |
 
 ### Releases

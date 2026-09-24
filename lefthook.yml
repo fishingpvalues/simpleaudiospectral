@@ -8,6 +8,9 @@ pre-commit:
     ruff-check:
       glob: "*.py"
       run: uv run ruff check {staged_files}
+    ty:
+      glob: "*.py"
+      run: uv run ty check
     prettier:
       root: web/
       glob: "*.{ts,tsx,js,json,css,html}"
