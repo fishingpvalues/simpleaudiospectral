@@ -95,12 +95,16 @@ def client_ip(peer: str, forwarded_for: str | None) -> str:
 
 
 class Lockout:
-    """Recent failed key checks per client. After LOCKOUT_FAILS failures within
-    LOCKOUT_WINDOW seconds, key checks from that client are refused until the
-    oldest failure ages out. An IPv6 /64 counts as one client. Nothing sleeps,
-    so a flood of guesses holds no threads."""
+    """Recent failed checks per client. After ``fails`` failures within
+    ``window`` seconds, checks from that client are refused until the oldest
+    failure ages out. An IPv6 /64 counts as one client. Nothing sleeps, so a
+    flood of guesses holds no threads. The defaults come from config at
+    construction, so two lockouts (key and two-factor code) can tune themselves
+    independently."""
 
-    def __init__(self) -> None:
+    def __init__(self, fails: int | None = None, window: int | None = None) -> None:
+        self.limit = fails if fails is not None else config.LOCKOUT_FAILS
+        self.window = window if window is not None else config.LOCKOUT_WINDOW
         self.fails: dict[str, list[float]] = {}
         self.lock = threading.Lock()
 
@@ -116,21 +120,20 @@ class Lockout:
         """Seconds until this client may try a key again (0 = now)."""
         now = time.time()
         with self.lock:
-            ts = [t for t in self.fails.get(self.bucket(ip), ()) if t > now - config.LOCKOUT_WINDOW]
-            if len(ts) < config.LOCKOUT_FAILS:
+            ts = [t for t in self.fails.get(self.bucket(ip), ()) if t > now - self.window]
+            if len(ts) < self.limit:
                 return 0
-            return math.ceil(ts[-config.LOCKOUT_FAILS] + config.LOCKOUT_WINDOW - now)
+            return math.ceil(ts[-self.limit] + self.window - now)
 
     def fail(self, ip: str) -> None:
         now = time.time()
         with self.lock:
             b = self.bucket(ip)
-            ts = [t for t in self.fails.get(b, ()) if t > now - config.LOCKOUT_WINDOW][
-                -config.LOCKOUT_FAILS :
-            ]
+            ts = [t for t in self.fails.get(b, ()) if t > now - self.window][-self.limit :]
             self.fails[b] = [*ts, now]
             if len(self.fails) > 10000:  # a spray from many addresses: drop the aged-out ones
-                self.fails = {k: v for k, v in self.fails.items() if v[-1] > now - config.LOCKOUT_WINDOW}
+                self.fails = {k: v for k, v in self.fails.items() if v[-1] > now - self.window}
 
 
 LOCKOUT = Lockout()
+CODE_LOCKOUT = Lockout(fails=config.CODE_LOCKOUT_FAILS, window=config.CODE_LOCKOUT_WINDOW)

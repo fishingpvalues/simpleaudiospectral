@@ -297,8 +297,11 @@ Checklist for a public instance:
 | `ACCESS_LOG` | unset | Set to any value to log requests. |
 | `API_KEY` | unset | Require this key on every API request (16+ characters). Unset means no authentication. |
 | `API_KEY_FILE` | unset | Read the key from this file instead, e.g. a Docker secret. |
-| `TRUSTED_PROXIES` | unset | Comma-separated addresses or CIDRs of reverse proxies whose `X-Forwarded-For` is believed. Set it whenever a proxy is in front. |
+| `TRUSTED_PROXIES` | unset | Comma-separated addresses or CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed. Set it whenever a proxy is in front. |
 | `MAX_CONNECTIONS` | `128` | Open connections at once; more are closed immediately. |
+| `LOCKOUT_FAILS` / `LOCKOUT_WINDOW` | `5` / `300` | Wrong-key lockout: failures per client before a `Retry-After` window. |
+| `CODE_LOCKOUT_FAILS` / `CODE_LOCKOUT_WINDOW` | `5` / `300` | Wrong two-factor code lockout, per client; independent of the key lockout. |
+| `TOTP_FILE` | `/pcm/.totp` | Where the two-factor secret is stored (mode 0600). |
 
 Every file is decoded once to 32-bit float PCM on disk and memory-mapped, so
 memory does not grow with the length of a file; a three-hour DJ set was
@@ -639,14 +642,25 @@ here:
   `SameSite=Strict` cookie scoped to `/api`. Its value is an expiry date
   signed with the key (HMAC-SHA256), not the key itself. The server enforces
   the 30-day expiry, and changing the key ends every session. The cookie is
-  marked `Secure` when the proxy sends `X-Forwarded-Proto: https`. There is no
-  server-side session list, so signing out removes the cookie from that
-  browser only; to revoke every session, change the key.
+  marked `Secure`, and `Strict-Transport-Security` is sent, only when the
+  `X-Forwarded-Proto: https` header comes from a trusted proxy (the app itself
+  never sees TLS when a proxy terminates it, so the proxy has to say).
+  Signing out revokes the session on the server; to revoke every session,
+  change the key.
 - **Brute-force lockout.** After 5 wrong keys within 5 minutes, a client gets
   `429` with `Retry-After` until the oldest failure is 5 minutes old; the
   correct key is refused too in that time, and a browser that already has a
   valid session keeps working. An IPv6 `/64` counts as one client. Nothing
   sleeps, so a flood of guesses holds no threads.
+- **Two-factor for the browser.** `POST /api/login` takes `{"key", "code"}`:
+  the key proves who you are, and when a two-factor secret is enrolled (via
+  `POST /api/twofa/setup` and `/verify`, both behind the API key) the
+  six-digit code from an authenticator app proves a person is at the
+  keyboard. The API key alone still opens every API route, exactly like the
+  *arr apps; the code only gates the browser session. A wrong code does not
+  feed the key lockout, but it has its own per-client lockout (5 wrong codes
+  within 5 minutes), so a leaked key cannot brute-force the code online.
+  Disarming two-factor also needs a live code.
 - **Client addresses behind a proxy.** `X-Forwarded-For` is ignored unless
   the connection comes from an address in `TRUSTED_PROXIES`, so a client
   cannot forge its way around the lockout. The client is then the last hop
@@ -725,7 +739,19 @@ Then set `TRUSTED_PROXIES` to the address the proxy connects from: for
 example `127.0.0.1` for a proxy on the same host, or the Docker network it
 shares with the app, such as `172.18.0.0/16`. Do not add a network that
 untrusted clients can connect from, or they could set their own
-`X-Forwarded-For`.
+`X-Forwarded-For` and `X-Forwarded-Proto`. Both headers are believed only
+from trusted peers: `X-Forwarded-For` decides which client a lockout counts,
+`X-Forwarded-Proto` decides whether the session cookie gets `Secure` and
+whether `Strict-Transport-Security` is sent.
+
+**Tailscale serve** is the simplest internet-grade front: it terminates TLS
+on the tailnet, proxies to a loopback port, and strips the `Tailscale-*`
+identity headers of forged requests. The app then sees every connection as
+coming from `127.0.0.1`, so set `TRUSTED_PROXIES: "127.0.0.1"` and
+`API_KEY`; publish the port on loopback only. Note that `tailscale serve`
+does not forward `X-Forwarded-Proto`, so the cookie is not marked `Secure`
+in this setup - which is fine, because the tailnet connection is TLS and the
+cookie is `SameSite=Strict` and `HttpOnly` either way.
 
 An authenticating proxy (forward auth, single sign-on, basic auth) can stand
 in for `API_KEY`. The app then trusts whoever the proxy lets through, so keep

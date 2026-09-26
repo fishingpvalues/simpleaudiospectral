@@ -51,9 +51,19 @@ class Handler(BaseHTTPRequestHandler):
         super().end_headers()
 
     def https(self) -> bool:
-        """Behind a TLS-terminating proxy that says so."""
+        """Behind a TLS-terminating *trusted* proxy that says so.
+
+        The header drives the ``Secure`` cookie flag and HSTS, so it is only
+        believed from a peer in ``TRUSTED_PROXIES`` - exactly as ``X-Forwarded-For``
+        is. A direct (unproxied) client cannot make the server claim the
+        connection was TLS by sending the header itself.
+        """
         h = getattr(self, "headers", None)  # absent when the request line itself was bad
-        return bool(h) and h.get("X-Forwarded-Proto") == "https"
+        return (
+            bool(h)
+            and h.get("X-Forwarded-Proto") == "https"
+            and auth.is_trusted_proxy(self.client_address[0])
+        )
 
     def log_message(self, format: str, *args) -> None:
         if config.ACCESS_LOG:

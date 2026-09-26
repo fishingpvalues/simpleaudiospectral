@@ -23,6 +23,11 @@ SESSION_MAX_AGE = 30 * 24 * 3600
 # that client's key checks until the oldest failure ages out.
 LOCKOUT_FAILS = 5
 LOCKOUT_WINDOW = 300
+# A right key with a wrong two-factor code is not a key failure, so it does not
+# feed the key lockout - but it must still be throttled per client, or a leaked
+# key allows an unlimited online brute-force of the six-digit code.
+CODE_LOCKOUT_FAILS = 5
+CODE_LOCKOUT_WINDOW = 300
 
 
 def _secret(name: str) -> str:
@@ -52,7 +57,7 @@ def reload() -> None:
     """(Re)read every setting from the environment."""
     global ROOT, CACHE, PORT, WEB, PCM_DIR, PCM_DISK_BUDGET, INDEX_INTERVAL
     global API_KEY, TRUSTED_PROXIES, MAX_CONNECTIONS, ACCESS_LOG, VERSION, JOBS
-    global TOTP_FILE
+    global TOTP_FILE, LOCKOUT_FAILS, LOCKOUT_WINDOW, CODE_LOCKOUT_FAILS, CODE_LOCKOUT_WINDOW
 
     ROOT = os.path.realpath(os.environ.get("LIBRARY_ROOT", "/library"))
     CACHE = os.environ.get("CACHE_DIR", "/cache")
@@ -72,6 +77,10 @@ def reload() -> None:
     # container already has one writable place; 0600, and it only matters
     # because API_KEY is needed first. Unset file: two-factor is not enrolled.
     TOTP_FILE = os.environ.get("TOTP_FILE") or os.path.join(PCM_DIR, ".totp")
+    LOCKOUT_FAILS = int(os.environ.get("LOCKOUT_FAILS", "5"))
+    LOCKOUT_WINDOW = int(os.environ.get("LOCKOUT_WINDOW", "300"))
+    CODE_LOCKOUT_FAILS = int(os.environ.get("CODE_LOCKOUT_FAILS", "5"))
+    CODE_LOCKOUT_WINDOW = int(os.environ.get("CODE_LOCKOUT_WINDOW", "300"))
     MAX_CONNECTIONS = int(os.environ.get("MAX_CONNECTIONS", "128"))
     ACCESS_LOG = bool(os.environ.get("ACCESS_LOG"))
     VERSION = _version()

@@ -70,10 +70,19 @@ def login(h: Handler, q: Query) -> None:
         return h.deny(state)
     secret = totp.load()
     if secret and not _cookie_of(h):
+        ip = h.client_ip()
+        if wait := auth.CODE_LOCKOUT.retry_after(ip):
+            return h.send(
+                429,
+                {"error": "too many wrong two-factor codes, try again later"},
+                headers={"Retry-After": str(wait), "Cache-Control": "no-store"},
+            )
         code = body.get("code")
         if not totp.valid(secret, code if isinstance(code, str) else ""):
-            # The key was right, so this is not a key failure: do not feed the
-            # lockout, and say the code - not the key - was wrong.
+            # The key was right, so this is not a key failure: it does not feed
+            # the key lockout. The code has its own per-client lockout, so a
+            # leaked key cannot brute-force the six-digit code at will.
+            auth.CODE_LOCKOUT.fail(ip)
             headers = {
                 "Cache-Control": "no-store",
                 "WWW-Authenticate": 'Bearer realm="simpleaudiospectral"',
@@ -115,7 +124,15 @@ def twofa_verify(h: Handler, q: Query) -> None:
     secret, code = body.get("secret"), body.get("code")
     if not isinstance(secret, str) or not isinstance(code, str):
         raise ValueError("secret and code are required")
+    ip = h.client_ip()
+    if wait := auth.CODE_LOCKOUT.retry_after(ip):
+        return h.send(
+            429,
+            {"error": "too many wrong two-factor codes, try again later"},
+            headers={"Retry-After": str(wait), "Cache-Control": "no-store"},
+        )
     if not totp.valid(secret, code):
+        auth.CODE_LOCKOUT.fail(ip)
         return h.send(401, {"error": "wrong two-factor code"}, headers={"Cache-Control": "no-store"})
     totp.save(secret)
     return h.send(200, {"ok": True, "twofa": True}, headers={"Cache-Control": "no-store"})

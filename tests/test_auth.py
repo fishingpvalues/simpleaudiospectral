@@ -20,6 +20,7 @@ from simpleaudiospectral.server.errors import public_error
 def api_key(server, monkeypatch):
     monkeypatch.setattr(config, "API_KEY", "s3cret-key-for-tests-0123456789")  # gitleaks:allow
     monkeypatch.setattr(auth, "LOCKOUT", auth.Lockout())
+    monkeypatch.setattr(auth, "CODE_LOCKOUT", auth.Lockout())
     return config.API_KEY
 
 
@@ -139,15 +140,41 @@ def test_forwarded_for_only_from_trusted_proxy(server, api_key, monkeypatch):
     assert get(server, "/api/ls?path=", {"X-API-Key": api_key, "X-Forwarded-For": "203.0.113.8"})[0] == 200
 
 
-def test_security_headers_everywhere(server):
+def test_security_headers_everywhere(server, monkeypatch):
     for path in ("/", "/api/health", "/api/nope"):
         _c, h, _ = get(server, path)
         assert h["X-Frame-Options"] == "DENY" and h["X-Content-Type-Options"] == "nosniff"
         assert "frame-ancestors 'none'" in h["Content-Security-Policy"]
         assert h["Referrer-Policy"] == "no-referrer"
         assert "Python" not in h["Server"]
+
+
+def test_hsts_and_secure_cookie_only_from_a_trusted_proxy(server, api_key, monkeypatch):
+    # A direct peer must not be able to claim the link is TLS: no HSTS, and the
+    # login cookie is not marked Secure. Forging X-Forwarded-Proto from an
+    # untrusted address is ignored.
+    _c, h, _ = get(server, "/api/health", {"X-Forwarded-Proto": "https"})
+    assert "Strict-Transport-Security" not in h
+    _code, h, _ = post(
+        server,
+        "/api/login",
+        json.dumps({"key": api_key}).encode(),
+        "application/json",
+        {"X-Forwarded-Proto": "https"},
+    )
+    assert "Secure" not in h["Set-Cookie"]
+    # The same header from a trusted proxy does the job.
+    monkeypatch.setattr(config, "TRUSTED_PROXIES", [ipaddress.ip_network("127.0.0.0/8")])
     _c, h, _ = get(server, "/api/health", {"X-Forwarded-Proto": "https"})
     assert h["Strict-Transport-Security"].startswith("max-age=")
+    _code, h, _ = post(
+        server,
+        "/api/login",
+        json.dumps({"key": api_key}).encode(),
+        "application/json",
+        {"X-Forwarded-Proto": "https"},
+    )
+    assert "Secure" in h["Set-Cookie"]
 
 
 def test_errors_hide_host_paths(server, api_key):
@@ -165,6 +192,7 @@ def twofa_secret(monkeypatch, api_key):
 
     secret = base64.b32encode(b"testsecret1234567890test").decode()
     monkeypatch.setattr(config, "TOTP_FILE", str(Path(config.PCM_DIR) / ".totp-test"))
+    monkeypatch.setattr(auth, "CODE_LOCKOUT", auth.Lockout())
     totp.save(secret)
     yield secret
     totp.revoke()
@@ -181,9 +209,8 @@ def test_twofa_flow(server, twofa_secret):
 
     # Without the code, a right key is refused for a new session.
     assert post(server, "/api/login", json.dumps({"key": API_KEY(), "code": ""}).encode())[0] == 401
-    # A wrong code is refused too, without feeding the key lockout: five
-    # wrong codes leave the correct key + code working.
-    for _ in range(5):
+    # A wrong code is refused too, and does not feed the key lockout.
+    for _ in range(3):
         post(server, "/api/login", json.dumps({"key": API_KEY(), "code": "000000"}).encode())
     code, h, _ = post(
         server, "/api/login", json.dumps({"key": API_KEY(), "code": _code(twofa_secret)}).encode()
@@ -220,6 +247,19 @@ def test_twofa_flow(server, twofa_secret):
     )
     assert totp.load() is None
     assert json.loads(get(server, "/api/health")[2])["twofa"] is False
+
+
+def test_twofa_code_lockout_is_separate_from_the_key(server, api_key, twofa_secret):
+    # A right key with a wrong code does not feed the key lockout...
+    for _ in range(5):
+        assert post(server, "/api/login", json.dumps({"key": api_key, "code": "000000"}).encode())[0] == 401
+    # ...but the code lockout still refuses: even the right code gets 429.
+    code, h, _ = post(
+        server, "/api/login", json.dumps({"key": api_key, "code": _code(twofa_secret)}).encode()
+    )
+    assert code == 429 and int(h["Retry-After"]) > 0
+    # The API key route is not affected by the code lockout at all.
+    assert get(server, "/api/ls?path=", {"X-API-Key": api_key})[0] == 200
 
 
 def test_twofa_setup_requires_auth(server, api_key):
