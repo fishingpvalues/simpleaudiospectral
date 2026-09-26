@@ -33,7 +33,7 @@ export function App() {
   const onLoaded = useCallback((i: Info) => resetView(fullView(i.duration, i.sampleRate)), [resetView])
   const { info, error, analysing, progress } = useFileInfo(path, onLoaded)
   const player = usePlayback(path)
-  const { version, authOn } = useHealth()
+  const { version, authOn, twofa, setTwofa } = useHealth()
   const announce = useAnnouncer(info, view)
   const { zoom, fit, pan, detailZoom, jump } = useViewActions(info, setView, player.seek)
   const { exportPng, registerExport } = usePngExport(path, view)
@@ -118,6 +118,8 @@ export function App() {
           info={info}
           version={version}
           authOn={authOn}
+          twofa={twofa}
+          onTwofa={setTwofa}
           onToggleLibrary={() => setLeft(v => !v)}
           onToggleAnalysis={() => setRight(v => !v)}
         />

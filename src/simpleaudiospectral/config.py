@@ -52,6 +52,7 @@ def reload() -> None:
     """(Re)read every setting from the environment."""
     global ROOT, CACHE, PORT, WEB, PCM_DIR, PCM_DISK_BUDGET, INDEX_INTERVAL
     global API_KEY, TRUSTED_PROXIES, MAX_CONNECTIONS, ACCESS_LOG, VERSION, JOBS
+    global TOTP_FILE
 
     ROOT = os.path.realpath(os.environ.get("LIBRARY_ROOT", "/library"))
     CACHE = os.environ.get("CACHE_DIR", "/cache")
@@ -67,6 +68,10 @@ def reload() -> None:
     API_KEY = _secret("API_KEY")
     # Reverse proxies whose X-Forwarded-For is believed.
     TRUSTED_PROXIES = _networks(os.environ.get("TRUSTED_PROXIES", ""))
+    # The two-factor secret lives next to the decoded-audio cache, where the
+    # container already has one writable place; 0600, and it only matters
+    # because API_KEY is needed first. Unset file: two-factor is not enrolled.
+    TOTP_FILE = os.environ.get("TOTP_FILE") or os.path.join(PCM_DIR, ".totp")
     MAX_CONNECTIONS = int(os.environ.get("MAX_CONNECTIONS", "128"))
     ACCESS_LOG = bool(os.environ.get("ACCESS_LOG"))
     VERSION = _version()
@@ -82,6 +87,7 @@ PCM_DISK_BUDGET: int
 INDEX_INTERVAL: int
 API_KEY: str
 TRUSTED_PROXIES: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+TOTP_FILE: str
 MAX_CONNECTIONS: int
 ACCESS_LOG: bool
 VERSION: str

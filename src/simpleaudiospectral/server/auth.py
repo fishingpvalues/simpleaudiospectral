@@ -1,11 +1,12 @@
 """API key, signed sessions, brute-force lockout, trusted proxies.
 
 With API_KEY set, every /api/ route except health, login and logout needs the
-key in a header ("Authorization: Bearer" or "X-API-Key"), or the session
+key in a header ("Authorization: Bearer ..." or "X-API-Key"), or the session
 cookie from POST /api/login, which browsers also send for <audio> and <img>.
 The key is never read from the query string, which ends up in logs.
 """
 
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -33,14 +34,44 @@ def new_session(now: float | None = None) -> str:
 
 
 def session_valid(value: str | None) -> bool:
-    exp, _, sig = (value or "").partition(".")
+    value = value or ""
+    exp, _, sig = value.partition(".")
     if not (exp.isascii() and exp.isdigit()) or int(exp) < time.time():
         return False
-    return hmac.compare_digest(sig.encode(), _sign(exp).encode())
+    if not hmac.compare_digest(sig.encode(), _sign(exp).encode()):
+        return False
+    return not REVOKED.is_revoked(value)
 
 
 def key_matches(key: str | None) -> bool:
     return bool(key) and hmac.compare_digest(key.encode(), config.API_KEY.encode())
+
+
+# A signed cookie cannot be recalled once it is out, so logout records a short
+# fingerprint of the session in-process until its natural expiry. A key
+# rotation still ends every session at once.
+class Revoked:
+    def __init__(self) -> None:
+        self.ids: dict[str, float] = {}  # fingerprint -> expiry
+        self.lock = threading.Lock()
+
+    def add(self, value: str, expires: float) -> None:
+        fp = base64.urlsafe_b64encode(hashlib.sha256(value.encode()).digest()[:12]).decode()
+        with self.lock:
+            self.ids[fp] = expires
+            if len(self.ids) > 4096:  # drop the already-expired, keep the rest
+                now = time.time()
+                self.ids = {k: v for k, v in self.ids.items() if v > now}
+
+    def is_revoked(self, value: str) -> bool:
+        fp = base64.urlsafe_b64encode(hashlib.sha256(value.encode()).digest()[:12]).decode()
+        now = time.time()
+        with self.lock:
+            exp = self.ids.get(fp)
+            return exp is not None and exp > now
+
+
+REVOKED = Revoked()
 
 
 def is_trusted_proxy(ip: str) -> bool:

@@ -22,6 +22,9 @@ GET_ROUTES = {
 POST_ROUTES = {
     "/api/login": session.login,
     "/api/logout": session.logout,
+    "/api/twofa/setup": session.twofa_setup,
+    "/api/twofa/verify": session.twofa_verify,
+    "/api/twofa/remove": session.twofa_remove,
 }
 
 __all__ = ["GET_ROUTES", "POST_ROUTES", "static"]

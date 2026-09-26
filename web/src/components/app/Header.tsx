@@ -4,17 +4,29 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Tip } from "@/components/ui/tooltip"
+import { TwoFactor } from "@/components/app/TwoFactor"
 
 interface HeaderProps {
   name: string | undefined
   info: Info | null
   version: string | null
   authOn: boolean
+  twofa: boolean
+  onTwofa: (on: boolean) => void
   onToggleLibrary: () => void
   onToggleAnalysis: () => void
 }
 
-export function Header({ name, info, version, authOn, onToggleLibrary, onToggleAnalysis }: HeaderProps) {
+export function Header({
+  name,
+  info,
+  version,
+  authOn,
+  twofa,
+  onTwofa,
+  onToggleLibrary,
+  onToggleAnalysis,
+}: HeaderProps) {
   return (
     <header className="col-span-3 flex items-center gap-2 border-b px-3">
       <Tip label="Library">
@@ -40,11 +52,14 @@ export function Header({ name, info, version, authOn, onToggleLibrary, onToggleA
       </div>
       {info && <FormatBadges info={info} />}
       {authOn && (
-        <Tip label="Sign out">
-          <Button variant="ghost" size="icon-sm" onClick={() => void api.logout()}>
-            <LogOut />
-          </Button>
-        </Tip>
+        <>
+          <TwoFactor enabled={twofa} onChange={onTwofa} />
+          <Tip label="Sign out">
+            <Button variant="ghost" size="icon-sm" onClick={() => void api.logout()}>
+              <LogOut />
+            </Button>
+          </Tip>
+        </>
       )}
       <Tip label="Analysis panel">
         <Button variant="ghost" size="icon-sm" onClick={onToggleAnalysis} disabled={!info}>

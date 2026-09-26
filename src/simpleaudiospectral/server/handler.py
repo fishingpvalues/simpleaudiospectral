@@ -165,11 +165,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         u = urllib.parse.urlparse(self.path)
+        # Login and logout forgery: browsers mark requests from other sites;
+        # only this origin (or a non-browser client) may post.
+        if self.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
+            return self.send(403, {"error": "cross-site request"})
         with self.errors_as_responses():
-            # Login and logout forgery: browsers mark requests from other sites;
-            # only this origin (or a non-browser client) may post.
-            if self.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
-                return self.send(403, {"error": "cross-site request"})
+            if u.path.startswith("/api/") and u.path not in auth.PUBLIC_API:
+                state = self.auth_state()
+                if state != "ok":
+                    return self.deny(state)
             route = POST_ROUTES.get(u.path)
             if route:
                 return route(self, {})

@@ -147,10 +147,12 @@ async function get(url: string, signal?: AbortSignal): Promise<Response> {
 
 export interface Health {
   status: string
-  version: string
-  indexed: boolean
+  version?: string
+  indexed?: boolean
   auth: boolean
   authenticated: boolean
+  /** A two-factor code is part of a browser login. */
+  twofa?: boolean
 }
 
 async function json<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -189,12 +191,41 @@ async function poll<T>(url: string, signal?: AbortSignal, onProgress?: (p: Progr
 
 export const api = {
   health: () => fetch("/api/health").then(r => r.json() as Promise<Health>),
-  /** Exchanges the key for an HttpOnly session cookie; false when the key is wrong. */
-  async login(key: string): Promise<boolean> {
+  /** Exchanges the key (and the two-factor code when enrolled) for an
+   * HttpOnly session cookie; false when the key or the code is wrong. */
+  async login(key: string, code = ""): Promise<boolean> {
     const r = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ key, code }),
+    })
+    if (r.status === 401) return false
+    if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText)
+    return true
+  },
+  /** The two-factor secret for an authenticator app; shown once. */
+  async twofaSetup(): Promise<{ secret: string; uri: string }> {
+    const r = await get("/api/twofa/setup")
+    if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText)
+    return (await r.json()) as { secret: string; uri: string }
+  },
+  /** Activate a freshly enrolled two-factor secret with a code from the app. */
+  async twofaVerify(secret: string, code: string): Promise<boolean> {
+    const r = await fetch("/api/twofa/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret, code }),
+    })
+    if (r.status === 401) return false
+    if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText)
+    return true
+  },
+  /** Disarm two-factor; a valid current code is required. */
+  async twofaRemove(code: string): Promise<boolean> {
+    const r = await fetch("/api/twofa/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
     })
     if (r.status === 401) return false
     if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? r.statusText)
