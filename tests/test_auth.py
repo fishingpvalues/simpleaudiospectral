@@ -1,5 +1,6 @@
 """API key, sessions, lockout and HTTP hardening, over HTTP."""
 
+import base64
 import ipaddress
 import json
 import os
@@ -28,6 +29,25 @@ def test_auth_off_by_default(server):
     assert get(server, "/api/ls?path=")[0] == 200
 
 
+def test_startup_refuses_proxy_trust_without_key(monkeypatch):
+    from simpleaudiospectral.server import app
+
+    # Trusting a proxy's X-Forwarded-For without a key is a misconfiguration;
+    # the process must refuse to start rather than serve unauthenticated.
+    monkeypatch.setattr(config, "API_KEY", "")
+    monkeypatch.setattr(config, "TRUSTED_PROXIES", [ipaddress.ip_network("172.18.0.0/16")])
+    with pytest.raises(SystemExit) as e:
+        app.startup_guard()
+    assert "TRUSTED_PROXIES" in str(e.value)
+    # And a short key still refuses to start.
+    monkeypatch.setattr(config, "API_KEY", "short")
+    with pytest.raises(SystemExit):
+        app.startup_guard()
+    # A proper key passes the guard.
+    monkeypatch.setattr(config, "API_KEY", "a-key-long-enough-0123456789")
+    app.startup_guard()
+
+
 def test_auth_required_with_api_key(server, api_key):
     code, h, _ = get(server, "/api/ls?path=")
     assert code == 401 and h["WWW-Authenticate"].startswith("Bearer")
@@ -42,7 +62,9 @@ def test_auth_required_with_api_key(server, api_key):
 
 def test_health_signed_out_reveals_nothing(server, api_key):
     _code, _h, body = get(server, "/api/health")
-    assert json.loads(body) == {"status": "ok", "auth": True, "authenticated": False}
+    # The two-factor flag is visible signed out: the login form has to draw
+    # the code field. Nothing else about the state is.
+    assert json.loads(body) == {"status": "ok", "auth": True, "authenticated": False, "twofa": False}
     _code, _h, body = get(server, "/api/health", {"X-API-Key": api_key})
     d = json.loads(body)
     assert d["authenticated"] is True and d["version"]
@@ -51,7 +73,7 @@ def test_health_signed_out_reveals_nothing(server, api_key):
 def test_login_cookie_session(server, api_key):
     assert post(server, "/api/login", json.dumps({"key": "nope"}).encode())[0] == 401
     assert post(server, "/api/login", json.dumps({"key": api_key}).encode(), "text/plain")[0] == 400
-    assert post(server, "/api/login", b"[1]")[0] == 401
+    assert post(server, "/api/login", b"[1]")[0] == 400  # not a JSON object
     code, h, _ = post(server, "/api/login", json.dumps({"key": api_key}).encode())
     cookie = h["Set-Cookie"]
     assert code == 200 and "HttpOnly" in cookie and "SameSite=Strict" in cookie
@@ -128,8 +150,127 @@ def test_security_headers_everywhere(server):
     assert h["Strict-Transport-Security"].startswith("max-age=")
 
 
-def test_errors_hide_host_paths(server):
+def test_errors_hide_host_paths(server, api_key):
     assert config.ROOT not in public_error(RuntimeError(f"decode failed: {config.ROOT}/x.flac: bad"))
+
+
+# ------------------------------------------------------------ two-factor
+
+
+@pytest.fixture
+def twofa_secret(monkeypatch, api_key):
+    from pathlib import Path
+
+    from simpleaudiospectral.server import totp
+
+    secret = base64.b32encode(b"testsecret1234567890test").decode()
+    monkeypatch.setattr(config, "TOTP_FILE", str(Path(config.PCM_DIR) / ".totp-test"))
+    totp.save(secret)
+    yield secret
+    totp.revoke()
+
+
+def _code(secret, step=None):
+    from simpleaudiospectral.server import totp
+
+    return totp.code_at(secret, totp.step_at() if step is None else step)
+
+
+def test_twofa_flow(server, twofa_secret):
+    from simpleaudiospectral.server import totp
+
+    # Without the code, a right key is refused for a new session.
+    assert post(server, "/api/login", json.dumps({"key": API_KEY(), "code": ""}).encode())[0] == 401
+    # A wrong code is refused too, without feeding the key lockout: five
+    # wrong codes leave the correct key + code working.
+    for _ in range(5):
+        post(server, "/api/login", json.dumps({"key": API_KEY(), "code": "000000"}).encode())
+    code, h, _ = post(
+        server, "/api/login", json.dumps({"key": API_KEY(), "code": _code(twofa_secret)}).encode()
+    )
+    assert code == 200 and h["Set-Cookie"]
+    session = h["Set-Cookie"].split(";")[0]
+    assert get(server, "/api/ls?path=", {"Cookie": session})[0] == 200
+    # The API key alone still opens API routes - like the *arr apps, the
+    # second factor only gates the browser session.
+    assert get(server, "/api/ls?path=", {"X-API-Key": API_KEY()})[0] == 200
+    # Health now says a code is part of a login.
+    assert json.loads(get(server, "/api/health")[2])["twofa"] is True
+    # A valid session re-login needs no code (the browser already proved it).
+    assert (
+        post(
+            server,
+            "/api/login",
+            json.dumps({"key": API_KEY()}).encode(),
+            "application/json",
+            {"Cookie": session},
+        )[0]
+        == 200
+    )
+    # Remove needs a live code.
+    assert (
+        post(
+            server,
+            "/api/twofa/remove",
+            json.dumps({"code": _code(twofa_secret)}).encode(),
+            "application/json",
+            {"X-API-Key": API_KEY(), "Cookie": session},
+        )[0]
+        == 200
+    )
+    assert totp.load() is None
+    assert json.loads(get(server, "/api/health")[2])["twofa"] is False
+
+
+def test_twofa_setup_requires_auth(server, api_key):
+    assert post(server, "/api/twofa/setup", b"")[0] == 401
+    assert get(server, "/api/twofa/setup", {"X-API-Key": api_key})[0] == 404  # POST-only route
+
+
+def test_twofa_verify_rejects_other_secret(server, api_key, twofa_secret):
+    from simpleaudiospectral.server import totp
+
+    other = base64.b32encode(b"anothersecret0123456789").decode()
+    # A code valid for one secret is not valid for another: the enrolled
+    # secret is unchanged.
+    r = post(
+        server,
+        "/api/twofa/verify",
+        json.dumps({"secret": other, "code": _code(twofa_secret)}).encode(),
+        "application/json",
+        {"X-API-Key": api_key},
+    )
+    assert r[0] == 401
+    assert totp.load() == twofa_secret
+
+
+def test_logout_revokes_the_session(server, api_key, twofa_secret):
+    code, h, _ = post(
+        server, "/api/login", json.dumps({"key": api_key, "code": _code(twofa_secret)}).encode()
+    )
+    session = h["Set-Cookie"].split(";")[0]
+    assert get(server, "/api/ls?path=", {"Cookie": session})[0] == 200
+    assert post(server, "/api/logout", b"", "application/json", {"Cookie": session})[0] == 200
+    # The same cookie, replayed from a captured response, is dead.
+    assert get(server, "/api/ls?path=", {"Cookie": session})[0] == 401
+    # A fresh login still works.
+    code, _, _ = post(
+        server, "/api/login", json.dumps({"key": api_key, "code": _code(twofa_secret)}).encode()
+    )
+    assert code == 200
+
+
+# ------------------------------------------------------------ range
+
+
+def test_malformed_range_is_not_a_crash(server):
+    for bad in ("bytes=abc-", "bytes=10-20-30", "bytes=-5-"):
+        code, _, _ = get(server, "/api/audio?path=Artist/Album/01%20real.flac", {"Range": bad})
+        assert code == 416, (bad, code)  # unsatisfiable, not a 500
+
+
+def API_KEY() -> str:
+    return config.API_KEY
 
 
 def test_ffmpeg_refuses_network_and_other_files(server):

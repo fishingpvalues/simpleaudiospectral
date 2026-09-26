@@ -16,15 +16,20 @@ if TYPE_CHECKING:
 
 def parse_range(header: str, size: int) -> tuple[int, int] | None:
     """(start, end) inclusive of the first range in a Range header, the whole
-    file when there is none, or None when it is unsatisfiable."""
+    file when there is none, or None when it is unsatisfiable. A malformed
+    header is also unsatisfiable: browsers and proxies send them, and a 400
+    is the honest answer rather than a server crash."""
     start, end = 0, size - 1
     if not header.startswith("bytes="):
         return start, end
     a, _, b = header[6:].split(",", maxsplit=1)[0].partition("-")
-    if a:
-        start, end = int(a), int(b) if b else size - 1
-    elif b:
-        start = max(0, size - int(b))
+    try:
+        if a:
+            start, end = int(a), int(b) if b else size - 1
+        elif b:
+            start = max(0, size - int(b))
+    except ValueError:
+        return None
     end = min(end, size - 1)
     return (start, end) if start <= end else None
 

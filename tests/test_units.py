@@ -21,6 +21,9 @@ from simpleaudiospectral.server.routes.params import channel, num, time_range
         ("bytes=-100", (900, 999)),  # the last 100 bytes
         ("bytes=10-20,30-40", (10, 20)),  # only the first range
         ("bytes=1000-", None),  # past the end
+        ("bytes=abc-", None),  # malformed: unsatisfiable, not a crash
+        ("bytes=10-20-30", None),
+        ("bytes=-5-", None),
     ],
 )
 def test_parse_range(header, expected):
