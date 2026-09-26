@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.6](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.5...v0.0.6) (2026-09-26)
+
+
+### Features
+
+* two-factor authentication for browser logins ([2b7b4b1](https://github.com/fishingpvalues/simpleaudiospectral/commit/2b7b4b1992a3b2b1e24e46c05dbf2608d000cc29))
+
+
+### Bug Fixes
+
+* 416 on malformed Range, refuse proxy trust without a key ([165135f](https://github.com/fishingpvalues/simpleaudiospectral/commit/165135fbfb467377ad08ac288904126d3bea8cc2))
+* trust forwarded proto only from trusted proxies, throttle TOTP ([7740ff4](https://github.com/fishingpvalues/simpleaudiospectral/commit/7740ff44831a9dab3dc34a43e36fe6420e1928b1))
+
 ## [0.0.5](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.4...v0.0.5) (2026-09-24)
 
 
