@@ -745,13 +745,15 @@ from trusted peers: `X-Forwarded-For` decides which client a lockout counts,
 whether `Strict-Transport-Security` is sent.
 
 **Tailscale serve** is the simplest internet-grade front: it terminates TLS
-on the tailnet, proxies to a loopback port, and strips the `Tailscale-*`
-identity headers of forged requests. The app then sees every connection as
-coming from `127.0.0.1`, so set `TRUSTED_PROXIES: "127.0.0.1"` and
-`API_KEY`; publish the port on loopback only. Note that `tailscale serve`
-does not forward `X-Forwarded-Proto`, so the cookie is not marked `Secure`
-in this setup - which is fine, because the tailnet connection is TLS and the
-cookie is `SameSite=Strict` and `HttpOnly` either way.
+on the tailnet, proxies to a loopback port, strips the `Tailscale-*`
+identity headers of forged requests, and forwards `X-Forwarded-For` and
+`X-Forwarded-Proto`. Set `TRUSTED_PROXIES` to the address the app actually
+sees the proxy connecting from: for a host-side `tailscale serve` reaching a
+docker-published port that is the docker-bridge gateway (not the host
+loopback), so trust that exact address - for example
+`TRUSTED_PROXIES: "172.22.0.1"` - and set `API_KEY`; publish the port on
+loopback only. With the gateway trusted, the lockout and the `Secure`/HSTS
+handling see the real tailnet client, which is what you want.
 
 An authenticating proxy (forward auth, single sign-on, basic auth) can stand
 in for `API_KEY`. The app then trusts whoever the proxy lets through, so keep
