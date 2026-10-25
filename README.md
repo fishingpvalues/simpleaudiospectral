@@ -25,8 +25,7 @@ codec and bitrate (for example "MP3 V2/192k"), scans whole albums at once,
 and runs in the browser on any device, with an HTTP API for scripts.
 
 Its checks rest on encoder source code and published research on
-fake-lossless detection, not on rules of thumb, which makes it usable for
-the spectral reviews that curated lossless communities such as RED expect.
+fake-lossless detection, not on rules of thumb.
 The viewer draws a zoomable spectrogram in the style of Adobe Audition, and
 the tool exports the widely used SoX spectrogram image.
 
@@ -487,12 +486,6 @@ the page loads nothing from third-party hosts.
 With `API_KEY` set and HTTPS in front, yes; see
 [Exposing it beyond localhost](#exposing-it-beyond-localhost) and
 [Security](#security).
-
-### Is it good enough for private music trackers' spectral checks?
-
-It produces the usual evidence (full and zoomed spectrograms, the SoX
-spectrogram image, cut-off and codec estimate), based on encoder data rather
-than rules of thumb. Each community's own rules still decide.
 
 ## Keyboard shortcuts
 
