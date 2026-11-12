@@ -5,7 +5,7 @@ test("the API refuses requests without the key", async ({ request }) => {
   expect((await request.get("/api/ls?path=")).status()).toBe(401)
   expect((await request.get("/api/ls?path=", { headers: { "X-API-Key": API_KEY } })).status()).toBe(200)
   const health = await (await request.get("/api/health")).json()
-  expect(health).toEqual({ status: "ok", auth: true, authenticated: false })
+  expect(health).toEqual({ status: "ok", auth: true, twofa: false, authenticated: false })
 })
 
 test("sign in, use the app, sign out", async ({ page }) => {
