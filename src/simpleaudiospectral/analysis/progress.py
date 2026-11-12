@@ -38,7 +38,7 @@ PRIORS = {
     "soxbits": 0.06,
 }
 LABELS = {
-    "queued": "Waiting for a free analysis slot",
+    "queued": "Reading the file",
     "decode": "Decoding",
     "levels": "Levels, loudness blocks and waveform",
     "spectra": "Spectrum of every frame",
@@ -123,13 +123,18 @@ class Tracker:
             self.current = "done"
 
     def _scale(self) -> float:
-        """Seconds per prior unit, from the stages that have been measured."""
-        num = den = 0.0
-        for st in self.stages.values():
-            if st.started is not None and (st.ended is not None or st.done >= MIN_MEASURE):
-                num += st.cost(1.0)
-                den += st.prior
-        return num / den if den else 1.0
+        """Seconds per prior unit, from the stages that have been measured.
+        The decode is usually bound by the library disk, not the CPU: it
+        sets the scale only until a computing stage has been measured."""
+        measured = [
+            st
+            for st in self.stages.values()
+            if st.started is not None and (st.ended is not None or st.done >= MIN_MEASURE)
+        ]
+        computing = [st for st in measured if st.key != "decode"]
+        use = computing or measured
+        den = sum(st.prior for st in use)
+        return sum(st.cost(1.0) for st in use) / den if den else 1.0
 
     def _remaining(self, scale: float, fresh: bool) -> float:
         """Expected seconds left (fresh: as if nothing had been done)."""
