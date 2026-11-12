@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.7](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.6...v0.0.7) (2026-11-12)
+
+
+### Bug Fixes
+
+* **progress:** learn the time scale from computing stages ([d1855b8](https://github.com/fishingpvalues/simpleaudiospectral/commit/d1855b8aabd6ab4fb5a572a971dad5cf6746921f))
+
+
+### Performance
+
+* one probe per file, bit usage from the decoded PCM ([c0a34b0](https://github.com/fishingpvalues/simpleaudiospectral/commit/c0a34b0b8c2b6eb9bd91a36254c10098f835aeb7))
+
 ## [0.0.6](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.5...v0.0.6) (2026-11-12)
 
 
