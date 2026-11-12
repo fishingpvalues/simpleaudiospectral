@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.9](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.8...v0.0.9) (2026-11-12)
+
+
+### Performance
+
+* album scan analyses MAX_JOBS tracks at once ([6c8d270](https://github.com/fishingpvalues/simpleaudiospectral/commit/6c8d270321c91c6b04e2b4e838e04cf17e55f02a))
+
 ## [0.0.8](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.7...v0.0.8) (2026-11-12)
 
 
