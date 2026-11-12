@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.6](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.5...v0.0.6) (2026-11-12)
+
+
+### Features
+
+* real analysis progress, event stream and one-call analysis API ([8a8e86a](https://github.com/fishingpvalues/simpleaudiospectral/commit/8a8e86ad8ae0cfbad1bf9b23c02d90c131467358))
+* two-factor authentication for browser logins ([2b7b4b1](https://github.com/fishingpvalues/simpleaudiospectral/commit/2b7b4b1992a3b2b1e24e46c05dbf2608d000cc29))
+
+
+### Bug Fixes
+
+* 416 on malformed Range, refuse proxy trust without a key ([165135f](https://github.com/fishingpvalues/simpleaudiospectral/commit/165135fbfb467377ad08ac288904126d3bea8cc2))
+* **docker:** install Debian security updates over the base image ([9798b1c](https://github.com/fishingpvalues/simpleaudiospectral/commit/9798b1c91f521e234b3da519afdd1ba59759d62c))
+* trust forwarded proto only from trusted proxies, throttle TOTP ([7740ff4](https://github.com/fishingpvalues/simpleaudiospectral/commit/7740ff44831a9dab3dc34a43e36fe6420e1928b1))
+
+
+### Performance
+
+* sequential spill blocks, workers sized to the CPU quota ([9e03d6d](https://github.com/fishingpvalues/simpleaudiospectral/commit/9e03d6d6249de04f156c24c58e43316fe39095f9))
+
 ## [0.0.5](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.4...v0.0.5) (2026-09-24)
 
 
