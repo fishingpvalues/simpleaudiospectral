@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.8](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.7...v0.0.8) (2026-11-12)
+
+
+### Bug Fixes
+
+* **progress:** estimate unstarted stages from this machine's speed ([6398b17](https://github.com/fishingpvalues/simpleaudiospectral/commit/6398b1713499f20815a7e5afcc78f06b0db5a453))
+
 ## [0.0.7](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.6...v0.0.7) (2026-11-12)
 
 
