@@ -56,7 +56,7 @@ def _networks(spec: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
 def reload() -> None:
     """(Re)read every setting from the environment."""
     global ROOT, CACHE, PORT, WEB, PCM_DIR, PCM_DISK_BUDGET, INDEX_INTERVAL
-    global API_KEY, TRUSTED_PROXIES, MAX_CONNECTIONS, ACCESS_LOG, VERSION, JOBS, MAX_JOBS
+    global API_KEY, TRUSTED_PROXIES, MAX_CONNECTIONS, ACCESS_LOG, VERSION, JOBS
     global TOTP_FILE, LOCKOUT_FAILS, LOCKOUT_WINDOW, CODE_LOCKOUT_FAILS, CODE_LOCKOUT_WINDOW
 
     ROOT = os.path.realpath(os.environ.get("LIBRARY_ROOT", "/library"))
@@ -84,8 +84,7 @@ def reload() -> None:
     MAX_CONNECTIONS = int(os.environ.get("MAX_CONNECTIONS", "128"))
     ACCESS_LOG = bool(os.environ.get("ACCESS_LOG"))
     VERSION = _version()
-    MAX_JOBS = max(1, int(os.environ.get("MAX_JOBS", "3")))
-    JOBS = threading.BoundedSemaphore(MAX_JOBS)
+    JOBS = threading.BoundedSemaphore(int(os.environ.get("MAX_JOBS", "3")))
 
 
 ROOT: str
@@ -101,7 +100,6 @@ TOTP_FILE: str
 MAX_CONNECTIONS: int
 ACCESS_LOG: bool
 VERSION: str
-MAX_JOBS: int
 JOBS: threading.BoundedSemaphore
 
 reload()

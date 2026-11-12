@@ -24,7 +24,7 @@ class SpectrumPercentiles:
     file; the values, and so the percentiles, are the same.
     """
 
-    BUF_BYTES = 32 * 1024 * 1024
+    BUF_BYTES = 64 * 1024 * 1024
 
     def __init__(self, n, hop, keep, qs=(50, 90)):
         self.fr = Frames(n, hop)
