@@ -24,8 +24,11 @@ LABEL org.opencontainers.image.title="simpleaudiospectral" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}"
 
-# hadolint ignore=DL3008
+# The upgrade pulls Debian security fixes the base image does not carry yet
+# (zlib1g CVE-2026-76844/-85091 in python:3.14-slim-trixie, 2026-11).
+# hadolint ignore=DL3005,DL3008
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends sox libsox-fmt-mp3 libsox-fmt-base ffmpeg wget \
     && rm -rf /var/lib/apt/lists/*
 
