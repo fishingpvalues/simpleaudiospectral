@@ -28,7 +28,9 @@ def available_cpus() -> int:
 
 THREADS = max(1, min(8, available_cpus()))
 SPILL_DIR = tempfile.gettempdir()  # the app points this at the PCM volume
-SPILL_RAM_BYTES = 256 * 1024 * 1024  # below this the per-bin matrix stays in RAM
+SPILL_RAM_BYTES = (
+    64 * 1024 * 1024
+)  # below this the per-bin matrix stays in RAM (per signal; up to MAX_JOBS analyses run at once)
 STFT_GROUP_BYTES = 32 * 1024 * 1024  # full-resolution columns held at once in the viewer
 POOL = ThreadPoolExecutor(THREADS, thread_name_prefix="dsp")
 

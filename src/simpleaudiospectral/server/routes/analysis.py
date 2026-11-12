@@ -8,9 +8,11 @@ hold the request until it is ready.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from ... import config, library
@@ -134,7 +136,9 @@ def progress(h: Handler, q: Query) -> None:
 
 
 def scan(h: Handler, q: Query) -> None:
-    """Album scan: NDJSON, a {"total": n} line, then one row per track as it finishes."""
+    """Album scan: NDJSON, a {"total": n} line, then one row per track in
+    folder order. MAX_JOBS tracks are analysed at once, so one track's decode
+    (library disk) overlaps another's passes (CPU)."""
     files = library.audio_files(library.resolve_dir(q.get("path", "")))
     h.start_chunked("application/x-ndjson", {"Cache-Control": "no-store"})
 
@@ -143,10 +147,22 @@ def scan(h: Handler, q: Query) -> None:
         h.wfile.flush()
 
     line({"total": len(files)})
-    for f in files:
-        try:
-            row = jobs.scan_row(f)
-        except Exception as e:
-            row = {"name": os.path.basename(f), "error": str(e)[-200:]}
-        line(row)
+    pending = iter(files)
+    inflight: collections.deque = collections.deque()
+    # A client that goes away stops the scan: at most MAX_JOBS tracks still finish.
+    with ThreadPoolExecutor(config.MAX_JOBS, thread_name_prefix="scan") as pool:
+
+        def fill() -> None:
+            while len(inflight) < config.MAX_JOBS and (f := next(pending, None)) is not None:
+                inflight.append((f, pool.submit(jobs.scan_row, f)))
+
+        fill()
+        while inflight:
+            f, fut = inflight.popleft()
+            try:
+                row = fut.result()
+            except Exception as e:
+                row = {"name": os.path.basename(f), "error": str(e)[-200:]}
+            fill()
+            line(row)
     h.end_chunked()
