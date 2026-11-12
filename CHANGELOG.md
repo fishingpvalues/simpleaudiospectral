@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.10](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.9...v0.0.10) (2026-11-12)
+
+
+### Chores
+
+* release 0.0.10 with the album-scan revert ([fd8cbcc](https://github.com/fishingpvalues/simpleaudiospectral/commit/fd8cbcc5a46c669b4c75dea7f0fd43e103c94891))
+
 ## [0.0.9](https://github.com/fishingpvalues/simpleaudiospectral/compare/v0.0.8...v0.0.9) (2026-11-12)
 
 
