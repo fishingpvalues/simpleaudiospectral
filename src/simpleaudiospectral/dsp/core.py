@@ -1,5 +1,6 @@
 """Chunking, the worker pool and memory limits shared by every measurement."""
 
+import math
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -7,7 +8,25 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 CHUNK = 1 << 22  # target samples per chunk (~16 MB of float32 per channel)
-THREADS = max(1, min(8, os.cpu_count() or 1))
+
+
+def available_cpus() -> int:
+    """CPUs this process may really use: the affinity mask, capped by a cgroup
+    v2 CPU quota (docker --cpus). os.cpu_count() reports the host's cores, so
+    a container limited to 3 CPUs on a 12-core host would start 8 workers and
+    spend the quota on throttled context switches."""
+    n = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()[:2]
+        if quota != "max":
+            n = min(n, max(1, math.ceil(int(quota) / int(period))))
+    except (OSError, ValueError):
+        pass
+    return max(1, n)
+
+
+THREADS = max(1, min(8, available_cpus()))
 SPILL_DIR = tempfile.gettempdir()  # the app points this at the PCM volume
 SPILL_RAM_BYTES = 256 * 1024 * 1024  # below this the per-bin matrix stays in RAM
 STFT_GROUP_BYTES = 32 * 1024 * 1024  # full-resolution columns held at once in the viewer
