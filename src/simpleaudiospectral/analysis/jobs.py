@@ -11,7 +11,7 @@ import threading
 
 import numpy as np
 
-from .. import config
+from .. import config, tools
 from .. import pcm as pcm_cache
 from .passes import measure
 from .progress import Tracker
@@ -98,10 +98,12 @@ def run(path: str) -> dict:
             if key in ANALYSES:
                 return ANALYSES[key]
         raise RuntimeError("analysis failed")
+    ok = False
     try:
         res = _load_or_measure(path, key)
         with LOCK:
             _remember(key, res)
+        ok = True
         return res
     except Exception as e:
         # Recorded before RUNNING is cleared, so a poller never sees the
@@ -113,7 +115,7 @@ def run(path: str) -> dict:
             RUNNING.pop(key, None)
             t = PROGRESS.pop(key, None)
             if t is not None:
-                t.finish()
+                t.finish(learn=ok)
         ev.set()
 
 
@@ -133,6 +135,8 @@ def _load_or_measure(path: str, key: tuple) -> dict:
         tracker = PROGRESS.get(key)
         if tracker is None:
             tracker = PROGRESS[key] = Tracker()
+    meta = tools.ffprobe(path)  # cached: the decode and measure() probe the same file
+    tracker.mrows = meta["duration"] * meta["sampleRate"] / 1e6
     mm, sr = pcm_cache.PCM.open(path, lambda f: tracker.update("decode", f))
     tracker.complete("decode")
     res = measure(path, mm, sr, tracker.update)

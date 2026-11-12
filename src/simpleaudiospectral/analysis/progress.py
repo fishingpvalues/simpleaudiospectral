@@ -51,6 +51,12 @@ LABELS = {
 }
 MAIN = ("decode", "levels", "spectra", "percentiles", "sfb21")
 MIN_MEASURE = 0.05  # a stage's own rate is trusted from this fraction on
+# This machine's measured speed from earlier analyses, in seconds per prior
+# unit per million samples: "decode" (bound by the library disk) and
+# "compute" (everything else). A stage that has not started yet is estimated
+# from it, so the bar is right from the start instead of after the decode.
+LEARNED: dict[str, float] = {}
+LEARN_RATE = 0.5
 
 
 @dataclass
@@ -60,6 +66,10 @@ class Stage:
     done: float = 0.0
     started: float | None = None
     ended: float | None = None
+    partial: bool = False  # reported a fraction between 0 and 1: it really ran
+
+    def measured(self) -> bool:
+        return self.started is not None and (self.ended is not None or self.done >= MIN_MEASURE)
 
     def cost(self, scale: float) -> float:
         """Expected seconds for the whole stage."""
@@ -76,6 +86,7 @@ class Tracker:
     measurement threads at once."""
 
     stages: dict[str, Stage] = field(default_factory=dict)
+    mrows: float = 0.0  # million samples per channel, once known
     t0: float = field(default_factory=lambda: time.monotonic())  # noqa: PLW0108 - late-bound, so tests can patch the clock
     best: float = 0.0
     current: str = "queued"
@@ -107,6 +118,7 @@ class Tracker:
             if st.started is None:
                 st.started = now
             st.done = max(st.done, min(1.0, float(done)))
+            st.partial = st.partial or 0.0 < st.done < 1.0
             if st.done >= 1.0:
                 st.ended = now
             if key in MAIN:
@@ -116,31 +128,54 @@ class Tracker:
         """A stage that is finished, or skipped for this file."""
         self.update(key, 1.0)
 
-    def finish(self) -> None:
+    def finish(self, learn: bool = False) -> None:
+        """The result is ready; learn: remember this run's speed."""
         with self.lock:
+            if learn and self.mrows > 0:
+                self._learn()
             self.finished = True
             self.best = 1.0
             self.current = "done"
 
-    def _scale(self) -> float:
-        """Seconds per prior unit, from the stages that have been measured.
-        The decode is usually bound by the library disk, not the CPU: it
-        sets the scale only until a computing stage has been measured."""
-        measured = [
-            st
-            for st in self.stages.values()
-            if st.started is not None and (st.ended is not None or st.done >= MIN_MEASURE)
-        ]
-        computing = [st for st in measured if st.key != "decode"]
-        use = computing or measured
-        den = sum(st.prior for st in use)
-        return sum(st.cost(1.0) for st in use) / den if den else 1.0
+    def _learn(self) -> None:
+        dec = self.stages["decode"]
+        if dec.partial and dec.ended is not None:
+            self._remember("decode", [dec])
+        comp = [st for k, st in self.stages.items() if k != "decode" and st.partial and st.ended is not None]
+        if comp:
+            self._remember("compute", comp)
 
-    def _remaining(self, scale: float, fresh: bool) -> float:
+    def _remember(self, kind: str, stages: list[Stage]) -> None:
+        per = sum(st.cost(1.0) for st in stages) / sum(st.prior for st in stages) / self.mrows
+        old = LEARNED.get(kind)
+        LEARNED[kind] = per if old is None else old + LEARN_RATE * (per - old)
+
+    def _scales(self) -> tuple[float, float]:
+        """Seconds per prior unit for (decode, computing stages) in this run:
+        measured in this run where possible, else learnt from earlier runs,
+        else from whatever this run has measured."""
+        measured = [st for st in self.stages.values() if st.measured()]
+        computing = [st for st in measured if st.key != "decode"]
+
+        def ratio(sts: list[Stage]) -> float | None:
+            den = sum(st.prior for st in sts)
+            return sum(st.cost(1.0) for st in sts) / den if den else None
+
+        run_any = ratio(measured) or 1.0
+        known = self.mrows > 0
+        comp = ratio(computing) or (
+            LEARNED["compute"] * self.mrows if known and "compute" in LEARNED else run_any
+        )
+        dec = LEARNED["decode"] * self.mrows if known and "decode" in LEARNED else run_any
+        return dec, comp
+
+    def _remaining(self, scales: tuple[float, float], fresh: bool) -> float:
         """Expected seconds left (fresh: as if nothing had been done)."""
+        dec_scale, comp_scale = scales
 
         def left(st: Stage) -> float:
-            return st.cost(scale) * (1.0 if fresh else 1.0 - st.done)
+            cost = st.cost(dec_scale if st.key == "decode" else comp_scale)
+            return cost * (1.0 if fresh else 1.0 - st.done)
 
         main = [st for k, st in self.stages.items() if k in MAIN and k != "decode"]
         side = [st for k, st in self.stages.items() if k not in MAIN]
@@ -154,16 +189,13 @@ class Tracker:
             if self.finished:
                 overall, eta = 1.0, 0.0
             else:
-                scale = self._scale()
-                total = self._remaining(scale, fresh=True)
-                rem = self._remaining(scale, fresh=False)
+                scales = self._scales()
+                total = self._remaining(scales, fresh=True)
+                rem = self._remaining(scales, fresh=False)
                 overall = 0.0 if total <= 0 else min(0.999, max(0.0, 1.0 - rem / total))
                 self.best = overall = max(self.best, overall)
-                measured = any(
-                    st.started is not None and (st.ended is not None or st.done >= MIN_MEASURE)
-                    for st in self.stages.values()
-                )
-                eta = round(rem, 1) if measured and elapsed >= 1.0 else None
+                known = any(st.measured() for st in self.stages.values()) or (self.mrows > 0 and LEARNED)
+                eta = round(rem, 1) if known and elapsed >= 1.0 else None
             stages = [
                 {"key": k, "label": LABELS[k], "done": round(st.done, 4)} for k, st in self.stages.items()
             ]

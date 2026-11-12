@@ -139,3 +139,34 @@ def test_ffmpeg_and_sox_progress_parsers():
     assert tools.ffmpeg_fraction(0)("out_time_us=5") is None
     assert tools.sox_fraction("In:45.20% 00:01:23.45 [00:01:40.00] Out:3.6M") == 0.452
     assert tools.sox_fraction("Bit-depth      16/16") is None
+
+
+def test_progress_learns_this_machines_speed(monkeypatch):
+    """After one analysis, the next one estimates its not yet started stages
+    from the speed measured before: the bar is not stuck behind a slow decode."""
+    from simpleaudiospectral.analysis import progress as pr
+
+    now = [0.0]
+    monkeypatch.setattr(pr.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(pr, "LEARNED", {})
+
+    def run(t, decode_s, compute_s):
+        for k, secs in (("decode", decode_s), ("levels", compute_s), ("spectra", compute_s * 3)):
+            for i in range(1, 11):
+                now[0] += secs / 10
+                t.update(k, i / 10)
+        for k in ("percentiles", "sfb21"):
+            t.complete(k)
+
+    first = pr.Tracker(mrows=10.0)
+    run(first, decode_s=30.0, compute_s=4.0)
+    first.finish(learn=True)
+    assert set(pr.LEARNED) == {"decode", "compute"}
+
+    second = pr.Tracker(mrows=10.0)
+    for i in range(1, 6):  # half the decode at the same speed
+        now[0] += 3.0
+        second.update("decode", i / 10)
+    s = second.snapshot()
+    # 15 s of about 15 + 30 left (15 decode + 16 compute): about a third, not a few percent
+    assert 0.25 < s["done"] < 0.45 and 20 < s["eta"] < 45
