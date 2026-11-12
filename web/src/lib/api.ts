@@ -162,26 +162,83 @@ async function json<T>(url: string, signal?: AbortSignal): Promise<T> {
   return body as T
 }
 
-export interface Progress {
-  stage: string
+export interface StageProgress {
+  key: string
+  label: string
   done: number
 }
 
+/** How far the server's analysis of a file is. Every number is measured by
+ * the server where the work happens; nothing here is a client-side timer. */
+export interface Progress {
+  /** Label of the current main stage. */
+  stage: string
+  stageKey?: string
+  /** Overall fraction 0..1, never decreasing; 1 only when the result is ready. */
+  done: number
+  /** Seconds since the analysis started. */
+  elapsed?: number
+  /** Seconds left, estimated from the measured rate; null until measurable. */
+  eta?: number | null
+  stages?: StageProgress[]
+}
+
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((res, rej) => {
+    const t = setTimeout(res, ms)
+    signal?.addEventListener("abort", () => {
+      clearTimeout(t)
+      rej(new DOMException("aborted", "AbortError"))
+    })
+  })
+
+/** Follows the analysis of `path` over Server-Sent Events until it is ready.
+ * Resolves true when done, false when the stream is unavailable (the caller
+ * then polls); rejects with the server's message when the analysis failed. */
+function followProgress(path: string, signal: AbortSignal | undefined, onProgress?: (p: Progress) => void) {
+  return new Promise<boolean>((resolve, reject) => {
+    if (typeof EventSource === "undefined") return resolve(false)
+    const es = new EventSource(`/api/progress?${q({ path })}`)
+    const close = (fn: () => void) => {
+      es.close()
+      signal?.removeEventListener("abort", onAbort)
+      fn()
+    }
+    const onAbort = () => close(() => reject(new DOMException("aborted", "AbortError")))
+    signal?.addEventListener("abort", onAbort)
+    es.addEventListener("progress", e => onProgress?.(JSON.parse((e as MessageEvent).data) as Progress))
+    es.addEventListener("done", e => {
+      onProgress?.(JSON.parse((e as MessageEvent).data) as Progress)
+      close(() => resolve(true))
+    })
+    es.addEventListener("failed", e =>
+      close(() => reject(new Error((JSON.parse((e as MessageEvent).data) as { error: string }).error))),
+    )
+    // A dropped or refused stream (401, proxy buffering): fall back to polling.
+    es.onerror = () => close(() => resolve(false))
+  })
+}
+
 /** The analysis of a long file runs in the background; the server answers 202
- * with its stage until the result is ready. */
-async function poll<T>(url: string, signal?: AbortSignal, onProgress?: (p: Progress) => void): Promise<T> {
+ * with its progress until the result is ready. Progress then streams over
+ * Server-Sent Events, with polling as the fallback. */
+async function poll<T>(
+  url: string,
+  path: string,
+  signal?: AbortSignal,
+  onProgress?: (p: Progress) => void,
+): Promise<T> {
+  let streamed = false
   for (;;) {
     const r = await get(url, signal)
     const body = await r.json()
     if (r.status === 202) {
       onProgress?.(body as Progress)
-      await new Promise<void>((res, rej) => {
-        const t = setTimeout(res, 1000)
-        signal?.addEventListener("abort", () => {
-          clearTimeout(t)
-          rej(new DOMException("aborted", "AbortError"))
-        })
-      })
+      if (!streamed && onProgress) {
+        streamed = true
+        if (await followProgress(path, signal, onProgress)) continue
+      }
+      await sleep(1000, signal)
       continue
     }
     if (!r.ok) throw new Error(body.error ?? r.statusText)
@@ -240,9 +297,9 @@ export const api = {
   search: (query: string, signal?: AbortSignal) =>
     json<{ ready: boolean; results: SearchHit[] }>(`/api/search?${q({ q: query, limit: 150 })}`, signal),
   info: (path: string, signal?: AbortSignal, onProgress?: (p: Progress) => void) =>
-    poll<Info>(`/api/info?${q({ path })}`, signal, onProgress),
+    poll<Info>(`/api/info?${q({ path })}`, path, signal, onProgress),
   stats: (path: string, signal?: AbortSignal, onProgress?: (p: Progress) => void) =>
-    poll<Stats>(`/api/stats?${q({ path })}`, signal, onProgress),
+    poll<Stats>(`/api/stats?${q({ path })}`, path, signal, onProgress),
   async stft(p: Record<string, string | number>, signal?: AbortSignal): Promise<Stft> {
     const r = await get(`/api/stft?${q(p)}`, signal)
     if (!r.ok) throw new Error((await r.json()).error ?? r.statusText)

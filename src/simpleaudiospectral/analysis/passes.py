@@ -24,6 +24,8 @@ from .levels import FULL_SCALE, dynamics, quiet_floor, side_level_db
 from .lowpass import HF_BAND_START, HF_N, HF_REF_BAND, SPEC_N, hf_band_top, lowpass
 from .report import analysis_result
 
+# progress(stage, fraction): stage is a key of progress.PRIORS. Called from
+# the analysis thread and from the SideJobs threads.
 Progress = Callable[[str, float], None]
 
 
@@ -50,17 +52,26 @@ def chunks(mm: np.memmap, step: int):
 class SideJobs:
     """External-tool measurements, run in threads alongside the passes."""
 
-    def __init__(self, path: str, mm: np.memmap, sr: int, meta: dict) -> None:
+    def __init__(self, path: str, mm: np.memmap, sr: int, meta: dict, progress: Progress) -> None:
         ext = os.path.splitext(path)[1].lower()
-        jobs = {"loudness": lambda: loudness(path, (filename(mm), sr, mm.shape[1]))}
+        raw = (filename(mm), sr, mm.shape[1])
+        jobs = {"loudness": lambda: loudness(path, raw, lambda f: progress("loudness", f))}
         if formats.is_lossless(meta["codecName"]):
-            jobs["bits"] = lambda: bit_usage(path, meta["bits"])
+            jobs["bits"] = lambda: bit_usage(path, meta, lambda f: progress("bits", f))
         if ext in formats.SOX_BITDEPTH:
-            jobs["soxbits"] = lambda: tools.sox_bitdepth(path)
+            jobs["soxbits"] = lambda: tools.sox_bitdepth(path, lambda f: progress("soxbits", f))
         self.out: dict = {}
+        for k in jobs:
+            progress(k, 0.0)  # counted from the start, before its first report
+
+        def run(k: str, f) -> None:
+            try:
+                self.out[k] = f()
+            finally:
+                progress(k, 1.0)
+
         self.threads = [
-            threading.Thread(target=lambda k=k, f=f: self.out.__setitem__(k, f()), daemon=True)
-            for k, f in jobs.items()
+            threading.Thread(target=run, args=(k, f), daemon=True, name=f"side-{k}") for k, f in jobs.items()
         ]
         for t in self.threads:
             t.start()
@@ -84,7 +95,7 @@ def pass_a(mm, sr, progress):
         if stereo or s in ("mix", "left")
     }
     for a, L32, R32 in chunks(mm, sm.chunk):
-        progress("levels and blocks", a / max(1, n))
+        progress("levels", a / max(1, n))
         sm.feed_pair(L32, R32, a)
         sig = signals(L32, R32, stereo)
         for s in names:
@@ -92,6 +103,7 @@ def pass_a(mm, sr, progress):
         rms_hf.feed(sig["mix"], a)
         for s, e in index.items():
             e.feed(sig[s], a)
+    progress("levels", 1.0)
     sm.finish()
     keeps = {s: dsp.loud_mask(rms[s].finish()) for s in names}
     return sm, keeps, dsp.loud_mask(rms_hf.finish()), index
@@ -113,7 +125,7 @@ def pass_b(mm, sr, sm, keeps, progress):
     )
     gonio = dsp.Goniometer(160, sm.ms_lim) if stereo else None
     for a, L32, R32 in chunks(mm, dsp.core.CHUNK):
-        progress("spectra of every frame", a / max(1, n))
+        progress("spectra", a / max(1, n))
         sig = signals(L32, R32, stereo)
         for s, c in spec.items():
             c.feed(sig[s], a)
@@ -125,8 +137,11 @@ def pass_b(mm, sr, sm, keeps, progress):
                 flat[1].feed(R32, a)
         if gonio:
             gonio.feed_pair(L32, R32, a)
-    progress("sorting per-bin percentiles", 0)
-    pct = {s: c.finish() for s, c in spec.items()}
+    progress("spectra", 1.0)
+    pct = {}
+    for i, (s, c) in enumerate(spec.items()):
+        pct[s] = c.finish(lambda f, i=i: progress("percentiles", (i + f) / len(spec)))
+    progress("percentiles", 1.0)
     flat_res = None
     if flat:
         cs = [f.finish() for f in flat]
@@ -139,8 +154,9 @@ def pass_c(mm, sr, keep_hf, top_hz, progress) -> float | None:
     n, stereo = mm.shape[0], mm.shape[1] > 1
     hf = dsp.BandRatioStd(sr, HF_N, HF_N // 2, keep_hf, HF_REF_BAND, (HF_BAND_START, top_hz))
     for a, L32, R32 in chunks(mm, dsp.core.CHUNK):
-        progress("sfb21 variability", a / max(1, n))
+        progress("sfb21", a / max(1, n))
         hf.feed(signals(L32, R32, stereo)["mix"], a)
+    progress("sfb21", 1.0)
     return hf.finish()
 
 
@@ -148,7 +164,7 @@ def measure(path: str, mm: np.memmap, sr: int, progress: Progress) -> dict:
     """Everything the UI shows about a file."""
     meta = tools.ffprobe(path)
     n, stereo = mm.shape[0], mm.shape[1] > 1
-    side_jobs = SideJobs(path, mm, sr, meta)
+    side_jobs = SideJobs(path, mm, sr, meta, progress)
 
     sm, keeps, keep_hf, index = pass_a(mm, sr, progress)
     pct, welch, clicks, flat, gonio = pass_b(mm, sr, sm, keeps, progress)
@@ -156,6 +172,7 @@ def measure(path: str, mm: np.memmap, sr: int, progress: Progress) -> dict:
     lp = lowpass(p90_raw, med_raw, sr)
     top_hz = hf_band_top(lp["cutoff_hz"], lp["nyq"])
     hf_sd = pass_c(mm, sr, keep_hf, top_hz, progress) if top_hz and n >= SPEC_N * 4 else None
+    progress("sfb21", 1.0)  # skipped without a cut-off to measure up to
 
     side_db = side_level_db(sm.total_ss["mix"] / max(1, n), sm.total_ss["side"] / max(1, n))
     analysis = (
@@ -172,7 +189,6 @@ def measure(path: str, mm: np.memmap, sr: int, progress: Progress) -> dict:
     left = mm[:, 0]
     right = mm[:, 1] if stereo else left
     dyn = dynamics(left, right, sr, sm, welch=welch, clicks=clicks, flat=flat)
-    progress("loudness and true peak (ffmpeg)", 1)
     side = side_jobs.join()
     meta["bitDepthUsed"] = side.get("soxbits")
     meta["duration"] = n / sr

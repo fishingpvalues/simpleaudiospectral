@@ -4,21 +4,22 @@ app version.
 """
 
 import collections
+import contextlib
 import json
 import os
 import threading
-import time
 
 import numpy as np
 
 from .. import config
 from .. import pcm as pcm_cache
 from .passes import measure
+from .progress import Tracker
 
 ANALYSES: collections.OrderedDict = collections.OrderedDict()  # (path, mtime) -> result
 LOCK = threading.Lock()
 RUNNING: dict = {}  # (path, mtime) -> Event, set when that analysis ends
-PROGRESS: dict = {}  # (path, mtime) -> {"stage": str, "done": 0..1}
+PROGRESS: dict = {}  # (path, mtime) -> progress.Tracker of a running analysis
 ERRORS: dict = {}  # (path, mtime) -> message, reported on the next poll
 SCAN_ROWS: dict = {}  # (path, mtime) -> album-scan row
 MAX_CACHED = 16
@@ -34,28 +35,49 @@ def cached(path: str) -> dict | None:
 
 def start(path: str) -> dict | None:
     """The result when it is ready; otherwise start the analysis in the
-    background (if it is not running) and return None. PROGRESS says how far
-    it is, ERRORS whether it failed."""
+    background (if it is not running) and return None. progress() says how
+    far it is, ERRORS whether it failed."""
     key = key_of(path)
     with LOCK:
         if key in ANALYSES:
             ANALYSES.move_to_end(key)
             return ANALYSES[key]
-        if key in RUNNING:
-            return None
-    threading.Thread(target=lambda: _run_reporting_errors(path), daemon=True, name="analysis").start()
-    time.sleep(0.05)  # a persisted result is usually back before the first poll
+        if key in RUNNING or key in PROGRESS:
+            return None  # running, or started and about to run
+    stored = _load(*_persist_paths(pcm_cache.PCM.file_for(path)))  # one ffprobe, no decode
     with LOCK:
-        return ANALYSES.get(key)
+        if stored is not None:
+            _remember(key, stored)
+            return stored
+        if key in RUNNING or key in PROGRESS:
+            return None
+        PROGRESS[key] = Tracker()  # visible before the thread runs: no "queued" gap
+    threading.Thread(target=lambda: _run_reporting_errors(path), daemon=True, name="analysis").start()
+    return None
+
+
+def _remember(key: tuple, res: dict) -> None:
+    """Keep a result in memory (LOCK held)."""
+    ANALYSES[key] = res
+    ERRORS.pop(key, None)
+    while len(ANALYSES) > MAX_CACHED:
+        ANALYSES.popitem(last=False)
+
+
+def progress(path: str) -> dict | None:
+    """The progress document of the analysis of `path`: None when no analysis
+    of it is running or ready, {"done": 1, ...} when it is ready."""
+    key = key_of(path)
+    if key in ANALYSES:
+        return {"stage": "Done", "stageKey": "done", "done": 1.0, "eta": 0.0, "pending": False}
+    t = PROGRESS.get(key)
+    return None if t is None else dict(t.snapshot(), pending=True)
 
 
 def _run_reporting_errors(path: str) -> None:
-    key = key_of(path)
-    try:
+    """run() in a background thread; a failure is left in ERRORS."""
+    with contextlib.suppress(Exception):  # recorded in ERRORS by run()
         run(path)
-        ERRORS.pop(key, None)
-    except Exception as e:
-        ERRORS[key] = str(e)[-300:]
 
 
 def run(path: str) -> dict:
@@ -79,32 +101,41 @@ def run(path: str) -> dict:
     try:
         res = _load_or_measure(path, key)
         with LOCK:
-            ANALYSES[key] = res
-            while len(ANALYSES) > MAX_CACHED:
-                ANALYSES.popitem(last=False)
+            _remember(key, res)
         return res
+    except Exception as e:
+        # Recorded before RUNNING is cleared, so a poller never sees the
+        # analysis as neither running, done nor failed.
+        ERRORS[key] = str(e)[-300:]
+        raise
     finally:
         with LOCK:
             RUNNING.pop(key, None)
+            t = PROGRESS.pop(key, None)
+            if t is not None:
+                t.finish()
         ev.set()
 
 
-def _persist_paths(mm: np.memmap) -> tuple[str, str]:
-    base = os.path.splitext(pcm_cache.filename(mm))[0] + f".analysis-{config.VERSION}"
+def _persist_paths(pcm_file: str) -> tuple[str, str]:
+    base = os.path.splitext(pcm_file)[0] + f".analysis-{config.VERSION}"
     return base + ".json", base + ".npz"
 
 
 def _load_or_measure(path: str, key: tuple) -> dict:
-    def progress(stage: str, done: float) -> None:
-        PROGRESS[key] = {"stage": stage, "done": round(float(done), 3)}
-
-    progress("decoding", 0)
-    mm, sr = pcm_cache.PCM.open(path)
-    fn, npz = _persist_paths(mm)
+    """A stored result is found from the PCM's name alone, so it loads
+    without decoding even after the PCM itself was evicted."""
+    fn, npz = _persist_paths(pcm_cache.PCM.file_for(path))
     loaded = _load(fn, npz)
     if loaded is not None:
         return loaded
-    res = measure(path, mm, sr, progress)
+    with LOCK:
+        tracker = PROGRESS.get(key)
+        if tracker is None:
+            tracker = PROGRESS[key] = Tracker()
+    mm, sr = pcm_cache.PCM.open(path, lambda f: tracker.update("decode", f))
+    tracker.complete("decode")
+    res = measure(path, mm, sr, tracker.update)
     _save(res, fn, npz)
     return res
 

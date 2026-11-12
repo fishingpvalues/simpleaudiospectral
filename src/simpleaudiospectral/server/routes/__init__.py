@@ -11,6 +11,8 @@ GET_ROUTES = {
     "/api/search": library.search,
     "/api/info": analysis.info,
     "/api/stats": analysis.stats,
+    "/api/analysis": analysis.analysis,
+    "/api/progress": analysis.progress,
     "/api/scan": analysis.scan,
     "/api/gonio": views.gonio,
     "/api/stft": views.stft,

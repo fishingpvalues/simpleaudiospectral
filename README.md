@@ -327,9 +327,12 @@ sample. Nothing is sampled, capped or estimated.
   run over the entire decoded file.
 - **Percentiles need every value.** The per-bin percentiles of the spectrum
   are taken over all analysed frames; for long files those values are
-  written to disk and sorted there, which is why the first analysis of a long
-  file takes minutes rather than seconds. The result is stored next to the
-  decoded audio, so each file is analysed once per version.
+  written to disk in large sequential blocks and sorted there, which is why
+  the first analysis of a two-hour set takes about a minute rather than
+  seconds. The progress bar follows the real position of every step. The
+  result is stored next to the decoded audio, so each file is analysed once
+  per version, and reopening it is instant even after the decoded audio was
+  evicted from the cache.
 
 ## How the verdict is reached
 
@@ -539,8 +542,10 @@ be scripted. Every `path` parameter is relative to `LIBRARY_ROOT`.
 | `GET /api/ls?path=` | Folders and audio files, with size and modification time |
 | `GET /api/roots` | Top-level volumes and their disk usage |
 | `GET /api/search?q=&limit=` | Matches from the library index |
-| `GET /api/info?path=` | Metadata and the lowpass, codec and hi-res analysis |
-| `GET /api/stats?path=` | Loudness, true peak, DR, clipping, bit usage, stereo and per-channel data |
+| `GET /api/info?path=[&wait=]` | Metadata and the lowpass, codec and hi-res analysis |
+| `GET /api/stats?path=[&wait=]` | Loudness, true peak, DR, clipping, bit usage, stereo and per-channel data |
+| `GET /api/analysis?path=[&wait=]` | Both in one document: `meta`, `analysis` and `stats` |
+| `GET /api/progress?path=` | How far the analysis is, as JSON, or as Server-Sent Events with `Accept: text/event-stream` |
 | `GET /api/scan?path=` | One NDJSON line per track in a folder, streamed as each finishes |
 | `GET /api/stft?path=&t0=&t1=&f0=&f1=&cols=&rows=&fft=&win=&scale=&ch=` | A uint8 dB matrix for a viewport, with metadata in `X-Meta` |
 | `GET /api/wave?path=&t0=&t1=&cols=&ch=` | Min and max peaks per column as float32 |
@@ -555,7 +560,21 @@ for the key once and trades it for a session cookie through
 `POST /api/login`. The key is never read from the query string, where it
 would end up in proxy and access logs.
 
+The first analysis of a file runs in the background. Until it is ready,
+`info`, `stats` and `analysis` answer `202` with its progress; `wait=<seconds>`
+(up to 600) holds the request until the result is ready instead, so a script
+needs one call. The progress document is measured, not timed: `done` is the
+overall fraction (it never goes back and is `1` only when the result is
+ready), `stage` the current step, `stages` each step's own fraction (decode,
+the passes over the audio, the per-bin percentiles, and the ffmpeg loudness,
+bit-usage and SoX passes that run alongside), `elapsed` the seconds so far
+and `eta` the seconds left at the measured rate (`null` until measurable).
+The event stream sends a `progress` event whenever that changes, then `done`
+or `failed`.
+
 ```sh
+curl -s -H "Authorization: Bearer $API_KEY" 'http://127.0.0.1:4748/api/analysis?path=music/Artist/Album/01.flac&wait=300' | jq .analysis.verdict
+curl -sN -H "Authorization: Bearer $API_KEY" -H 'Accept: text/event-stream' 'http://127.0.0.1:4748/api/progress?path=mixes/set.flac'
 curl -s -H "Authorization: Bearer $API_KEY" 'http://127.0.0.1:4748/api/info?path=music/Artist/Album/01.flac' | jq .analysis.verdict
 curl -sN 'http://127.0.0.1:4748/api/scan?path=music/Artist/Album'
 ```

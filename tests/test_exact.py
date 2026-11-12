@@ -57,7 +57,12 @@ def ref_loud(fr):
     return m if m.sum() >= 4 else np.ones(len(rms), bool)
 
 
-def test_spectrum_percentiles_identical(small_chunks):
+@pytest.mark.parametrize("buf_frames", [None, 37])
+def test_spectrum_percentiles_identical(small_chunks, monkeypatch, buf_frames):
+    """None: one spill block; 37: many blocks of an odd width, so the read-back
+    stitches columns from every block."""
+    if buf_frames:
+        monkeypatch.setattr(dsp.SpectrumPercentiles, "BUF_BYTES", buf_frames * 513 * 8)
     x, _ = signal()
     n, hop = 1024, 512
     fr = ref_frames(x, n, hop)
@@ -261,10 +266,12 @@ def test_bit_usage_counts_every_sample(small_chunks, tmp_path):
         check=True,
     ).stdout
     v = np.frombuffer(raw, np.int32)
-    u = (v >> 16).astype(np.int64) & 0xFFFF
-    ref = [round(int(np.count_nonzero((u >> i) & 1)) / len(v), 6) for i in range(16)]
-    got = bit_usage(str(f), 16)
-    assert got["samples"] == len(v) and got["ones"] == ref
+    for bits in (16, 24, 32):  # 24 and 32: the padding bits below the 16 real ones count as zero
+        u = (v >> (32 - bits)).astype(np.int64) & ((1 << bits) - 1)
+        ref = [round(int(np.count_nonzero((u >> i) & 1)) / len(v), 6) for i in range(bits)]
+        got = bit_usage(str(f), {"bits": bits})
+        assert got["samples"] == len(v) and got["ones"] == ref
+        assert got["unusedLowBits"] == bits - 16
 
 
 def test_column_extremes_identical(small_chunks):

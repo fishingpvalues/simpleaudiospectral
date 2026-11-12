@@ -6,12 +6,21 @@ file that is really a playlist or concat script cannot make them fetch URLs.
 """
 
 import json
+import os
+import re
 import subprocess
+import threading
+from collections.abc import Callable
 from typing import IO
 
 from . import config
 
 NO_NET = ("-protocol_whitelist", "file,pipe")
+# ffmpeg writes key=value progress blocks here; out_time_us is the position in
+# the output, which for a decode or a filter pass is how far it has read.
+FFMPEG_PROGRESS = ("-progress", "pipe:2", "-stats_period", "0.25")
+
+OnProgress = Callable[[float], None]
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -49,8 +58,9 @@ def ffprobe(path: str) -> dict:
     }
 
 
-def stream_layout(path: str) -> tuple[int, int]:
-    """(sample rate, channels capped at 2) of the first audio stream."""
+def stream_layout(path: str) -> tuple[int, int, float]:
+    """(sample rate, channels capped at 2, duration in seconds or 0) of the
+    first audio stream."""
     p = run(
         [
             "ffprobe",
@@ -60,39 +70,104 @@ def stream_layout(path: str) -> tuple[int, int]:
             "-select_streams",
             "a:0",
             "-show_entries",
-            "stream=sample_rate,channels",
+            "stream=sample_rate,channels,duration:format=duration",
             "-of",
             "json",
             path,
         ]
     )
-    st = (json.loads(p.stdout or b"{}").get("streams") or [{}])[0]
-    return int(st.get("sample_rate") or 44100), max(1, min(2, int(st.get("channels") or 1)))
+    data = json.loads(p.stdout or b"{}")
+    st = (data.get("streams") or [{}])[0]
+    dur = _float(st.get("duration")) or _float((data.get("format") or {}).get("duration"))
+    return int(st.get("sample_rate") or 44100), max(1, min(2, int(st.get("channels") or 1))), dur
 
 
-def decode_f32(path: str, channels: int, out) -> subprocess.CompletedProcess:
+def _float(v) -> float:
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def ffmpeg_fraction(duration: float) -> Callable[[str], float | None]:
+    """A parser for ffmpeg -progress lines: the fraction of `duration` done."""
+
+    def parse(line: str) -> float | None:
+        if line.startswith("out_time_us=") and duration > 0:
+            us = line[12:].strip()
+            return int(us) / 1e6 / duration if us.lstrip("-").isdigit() else None
+        if line == "progress=end":
+            return 1.0
+        return None
+
+    return parse
+
+
+_SOX_IN = re.compile(r"In:\s*([\d.]+)%")
+
+
+def sox_fraction(line: str) -> float | None:
+    m = _SOX_IN.search(line)
+    return float(m.group(1)) / 100 if m else None
+
+
+def run_tracked(
+    cmd: list[str],
+    parse: Callable[[str], float | None],
+    on_progress: OnProgress | None,
+    timeout: float,
+    stdout=subprocess.DEVNULL,
+) -> subprocess.CompletedProcess:
+    """Run cmd like run(), reading its stderr as it is written: every line
+    (split on CR or LF, as progress meters redraw with CR) goes to parse, and
+    each fraction it finds to on_progress. stderr is returned whole."""
+    proc = subprocess.Popen(cmd, stdout=stdout, stderr=subprocess.PIPE)
+    err = proc.stderr
+    if err is None:
+        raise RuntimeError("process has no stderr pipe")
+    parts: list[bytes] = []
+
+    def drain() -> None:
+        tail = b""
+        fd = err.fileno()
+        while chunk := os.read(fd, 65536):  # whatever is there, without waiting for 64 KB
+            parts.append(chunk)
+            if on_progress is None:
+                continue
+            *lines, tail = re.split(rb"[\r\n]", tail + chunk)
+            for line in lines:
+                f = parse(line.decode(errors="replace"))
+                if f is not None:
+                    on_progress(min(1.0, max(0.0, f)))
+
+    reader = threading.Thread(target=drain, daemon=True, name="progress")
+    reader.start()
+    try:
+        rc = proc.wait(timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        reader.join(5)
+        err.close()
+    return subprocess.CompletedProcess(cmd, rc, b"", b"".join(parts))
+
+
+def decode_f32(
+    path: str, channels: int, out, duration: float = 0, on_progress: OnProgress | None = None
+) -> subprocess.CompletedProcess:
     """Decode to raw float32 straight into the open file `out`. Capturing stdout
     instead would hold the whole decode in memory."""
-    return subprocess.run(
+    return run_tracked(
         [
-            "ffmpeg",
-            "-v",
-            "error",
-            *NO_NET,
-            "-i",
-            path,
-            "-map",
-            "0:a:0",
-            "-ac",
-            str(channels),
-            "-f",
-            "f32le",
-            "-",
+            *("ffmpeg", "-v", "error", "-nostats", *FFMPEG_PROGRESS, *NO_NET, "-i", path),
+            *("-map", "0:a:0", "-ac", str(channels), "-f", "f32le", "-"),
         ],
+        ffmpeg_fraction(duration),
+        on_progress,
+        config.TIMEOUT * 10,
         stdout=out,
-        stderr=subprocess.PIPE,
-        timeout=config.TIMEOUT * 10,
-        check=False,
     )
 
 
@@ -146,9 +221,9 @@ def wav_s32_stream(path: str) -> subprocess.Popen:
     )
 
 
-def sox_bitdepth(path: str) -> str | None:
+def sox_bitdepth(path: str, on_progress: OnProgress | None = None) -> str | None:
     """SoX `stats` bit depth as used/declared, e.g. "16/24" for a padded 24-bit file."""
-    p = run(["sox", path, "-n", "stats"])
+    p = run_tracked(["sox", "-S", path, "-n", "stats"], sox_fraction, on_progress, config.TIMEOUT * 10)
     for line in p.stderr.decode(errors="replace").splitlines():
         if line.startswith("Bit-depth"):
             return line.split()[1]

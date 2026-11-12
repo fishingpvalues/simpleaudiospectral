@@ -7,7 +7,7 @@
 - "Is this FLAC real or a transcode?" - brick-wall lowpass detection on the 90th-percentile spectrum, codec naming from encoder lowpass tables (LAME, FFmpeg AAC, Apple AAC, libvorbis, Opus) and MP3 sfb21 variability.
 - "Is this 24/96 or 24/192 file real hi-res?" - energy above 24 kHz, resample-source detection, per-bit usage histogram for padded bit depth.
 - Spectrogram review in the browser (Spek-like, Adobe Audition style), SoX spectrogram export, album scan with outlier detection.
-- Scripting: GET /api/info?path=..., /api/stats, /api/scan (NDJSON). Optional API key (Authorization: Bearer).
+- Scripting: GET /api/analysis?path=...&wait=300 (one call, whole result), /api/info, /api/stats, /api/progress (JSON or Server-Sent Events), /api/scan (NDJSON). Optional API key (Authorization: Bearer).
 
 ## Docs
 

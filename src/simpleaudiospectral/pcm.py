@@ -6,9 +6,11 @@ memory stays bounded whatever the length of the file.
 """
 
 import collections
+import contextlib
 import hashlib
 import os
 import threading
+import time
 
 import numpy as np
 
@@ -78,6 +80,7 @@ class PcmCache:
         self.maps: collections.OrderedDict = collections.OrderedDict()
         self.lock = threading.Lock()
         self.decoding: dict = {}
+        self.progress: dict = {}  # key -> fraction of a running decode
         self.dir: str | None = None
 
     def get(self, path: str, ch: str):
@@ -89,7 +92,9 @@ class PcmCache:
             return (mm[:, 1] if mm.shape[1] > 1 else mm[:, 0]), sr
         return Derived(mm, "side" if ch == "side" else "mix"), sr
 
-    def open(self, path: str) -> tuple[np.memmap, int]:
+    def open(self, path: str, on_progress: tools.OnProgress | None = None) -> tuple[np.memmap, int]:
+        """The decoded file and its sample rate, decoding it on first use.
+        on_progress(f) follows the decode, also when another request started it."""
         key = (path, os.path.getmtime(path))
         with self.lock:
             if key in self.maps:
@@ -99,14 +104,24 @@ class PcmCache:
             owner = ev is None
             if owner:
                 ev = self.decoding[key] = threading.Event()
+                self.progress[key] = 0.0
         if not owner:
-            ev.wait(config.TIMEOUT * 10)
+            deadline = time.monotonic() + config.TIMEOUT * 10
+            while not ev.wait(0.25) and time.monotonic() < deadline:
+                if on_progress:
+                    on_progress(self.progress.get(key, 0.0))
             with self.lock:
                 if key in self.maps:
                     return self.maps[key]
             raise RuntimeError("decode failed")
+
+        def report(f: float) -> None:
+            self.progress[key] = f
+            if on_progress:
+                on_progress(f)
+
         try:
-            val = self._decode(path, key)
+            val = self._decode(path, key, report)
             with self.lock:
                 self.maps[key] = val
                 while len(self.maps) > 32:
@@ -115,33 +130,57 @@ class PcmCache:
         finally:
             with self.lock:
                 self.decoding.pop(key, None)
+                self.progress.pop(key, None)
             ev.set()
 
-    def _decode(self, path: str, key: tuple) -> tuple[np.memmap, int]:
+    def file_for(self, path: str) -> str:
+        """Where the decode of `path` lives (or will live), without decoding:
+        derived results stored next to it are found even after the PCM itself
+        was evicted."""
+        key = (path, os.path.getmtime(path))
+        with self.lock:
+            if key in self.maps:
+                return filename(self.maps[key][0])
+        sr, nch, _ = tools.stream_layout(path)
+        return self._name(key, sr, nch)
+
+    def _name(self, key: tuple, sr: int, nch: int) -> str:
         if self.dir is None:
             self.dir = _writable_dir()
             dsp.core.SPILL_DIR = self.dir  # large per-bin matrices spill next to the PCM
-        sr, nch = tools.stream_layout(path)
         name = hashlib.sha256(repr(key).encode()).hexdigest()[:32]
-        fn = os.path.join(self.dir, f"{name}.{sr}.{nch}.f32")
+        return os.path.join(self.dir, f"{name}.{sr}.{nch}.f32")
+
+    def _decode(self, path: str, key: tuple, report: tools.OnProgress) -> tuple[np.memmap, int]:
+        sr, nch, duration = tools.stream_layout(path)
+        fn = self._name(key, sr, nch)
         if not os.path.exists(fn):
             tmp = f"{fn}.{threading.get_ident()}.tmp"
             with open(tmp, "wb") as out:
-                r = tools.decode_f32(path, nch, out)
+                r = tools.decode_f32(path, nch, out, duration, report)
             if r.returncode != 0 or os.path.getsize(tmp) == 0:
                 os.unlink(tmp)
-                raise RuntimeError("decode failed: " + r.stderr.decode(errors="replace")[-300:])
+                err = "\n".join(
+                    ln for ln in r.stderr.decode(errors="replace").splitlines() if "=" not in ln[:20]
+                )
+                raise RuntimeError("decode failed: " + err[-300:])
             os.replace(tmp, fn)
             self._evict(keep=fn)
+        report(1.0)
         os.utime(fn)  # mtime marks last use; atime is usually noatime
         n = os.path.getsize(fn) // (4 * nch)
         return np.memmap(fn, dtype=np.float32, mode="r", shape=(n, nch)), sr
 
     def _evict(self, keep: str) -> None:
-        """Delete the least recently used decodes beyond PCM_DISK_GB."""
+        """Delete the least recently used decodes beyond PCM_DISK_GB, and
+        stored analyses of other app versions (never read again)."""
         files = []
+        current = f".analysis-{config.VERSION}."
         for e in os.scandir(self.dir):
-            if e.name.endswith(".f32"):
+            if ".analysis-" in e.name and current not in e.name:
+                with contextlib.suppress(OSError):
+                    os.unlink(e.path)
+            elif e.name.endswith(".f32"):
                 st = e.stat()
                 files.append((st.st_mtime, st.st_size, e.path))
         total = sum(f[1] for f in files)

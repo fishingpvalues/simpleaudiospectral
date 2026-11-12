@@ -83,3 +83,59 @@ def test_search_ranks_name_matches_and_folders_first():
         "B/Album Notes/Other.flac",
     ]
     assert index.search("   ", 10) == []
+
+
+def test_progress_tracker_is_monotonic_and_ends_at_one(monkeypatch):
+    from simpleaudiospectral.analysis import progress as pr
+
+    now = [0.0]
+    monkeypatch.setattr(pr.time, "monotonic", lambda: now[0])
+    t = pr.Tracker()
+    assert t.snapshot()["done"] == 0 and t.snapshot()["eta"] is None
+    seen = []
+    # decode fast, then a stage far slower than its prior: the estimate bends,
+    # the reported fraction must not go back.
+    for k, steps, secs in (("decode", 10, 1.0), ("levels", 10, 1.0), ("spectra", 10, 30.0)):
+        for i in range(1, steps + 1):
+            now[0] += secs / steps
+            t.update(k, i / steps)
+            if k == "levels" and i == 1:
+                t.update("loudness", 0.0)
+            seen.append(t.snapshot()["done"])
+    t.complete("percentiles")
+    t.complete("sfb21")
+    t.update("loudness", 0.5)
+    seen.append(t.snapshot()["done"])
+    assert seen == sorted(seen) and seen[-1] < 1  # loudness still running
+    assert t.snapshot()["eta"] > 0
+    t.update("loudness", 1.0)
+    assert t.snapshot()["done"] == 0.999  # all stages done, result not yet stored
+    t.finish()
+    s = t.snapshot()
+    assert s["done"] == 1.0 and s["eta"] == 0 and s["stageKey"] == "done"
+
+
+def test_progress_unknown_stage_is_ignored():
+    from simpleaudiospectral.analysis.progress import Tracker
+
+    t = Tracker()
+    t.update("no such stage", 0.5)
+    assert {s["key"] for s in t.snapshot()["stages"]} == {
+        "decode",
+        "levels",
+        "spectra",
+        "percentiles",
+        "sfb21",
+    }
+
+
+def test_ffmpeg_and_sox_progress_parsers():
+    from simpleaudiospectral import tools
+
+    parse = tools.ffmpeg_fraction(10.0)
+    assert parse("out_time_us=2500000") == 0.25
+    assert parse("out_time_us=N/A") is None and parse("frame=1") is None
+    assert parse("progress=end") == 1.0
+    assert tools.ffmpeg_fraction(0)("out_time_us=5") is None
+    assert tools.sox_fraction("In:45.20% 00:01:23.45 [00:01:40.00] Out:3.6M") == 0.452
+    assert tools.sox_fraction("Bit-depth      16/16") is None

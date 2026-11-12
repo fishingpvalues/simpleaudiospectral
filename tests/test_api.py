@@ -118,3 +118,87 @@ def test_concurrent_sox_renders_of_one_image(server):
     with ThreadPoolExecutor(4) as pool:
         codes = [r[0] for r in pool.map(lambda _: get(server, path), range(4))]
     assert codes == [200, 200, 200, 200]
+
+
+def _fresh(library_root: str, name: str, seconds: int = 30) -> str:
+    """A file no test has analysed yet, so its analysis really runs."""
+    from conftest import ffmpeg
+
+    src = f"anoisesrc=d={seconds}:c=pink:a=0.3,aformat=channel_layouts=stereo"
+    ffmpeg("-f", "lavfi", "-i", src, "-sample_fmt", "s16", os.path.join(library_root, name))
+    return name
+
+
+def test_progress_streams_until_done(server):
+    """Server-Sent Events: progress events whose overall fraction never goes
+    back, each with every stage's own fraction, then one done event."""
+    import urllib.request
+
+    name = _fresh(config.ROOT, "sse.flac")
+    req = urllib.request.Request(
+        f"{server}/api/progress?path={name}", headers={"Accept": "text/event-stream"}
+    )
+    events = []
+    with urllib.request.urlopen(req, timeout=120) as r:
+        assert r.headers["Content-Type"] == "text/event-stream"
+        ev = None
+        for raw in r:
+            line = raw.decode().strip()
+            if line.startswith("event:"):
+                ev = line[7:]
+            elif line.startswith("data:"):
+                events.append((ev, json.loads(line[6:])))
+    kinds = [e for e, _ in events]
+    assert kinds[-1] == "done" and set(kinds[:-1]) <= {"progress"}
+    done = [d["done"] for _, d in events]
+    assert done == sorted(done) and done[-1] == 1.0
+    assert all(0 <= x < 1 for x in done[:-1])
+    stages = {s["key"] for _, d in events[:-1] for s in d["stages"]}
+    assert {"decode", "levels", "spectra", "percentiles", "loudness", "bits"} <= stages
+    code, d = jget(server, f"/api/info?path={name}")
+    assert code == 200 and d["analysis"]["level"] == "ok"
+
+
+def test_progress_json_and_202_document(server):
+    name = _fresh(config.ROOT, "poll.flac")
+    code, _, body = get(server, f"/api/info?path={name}")
+    if code == 202:
+        p = json.loads(body)
+        assert p["pending"] is True and 0 <= p["done"] < 1 and p["stage"] and "stages" in p
+    code, d = jget(server, f"/api/info?path={name}")
+    assert code == 200
+    code, d = jget(server, f"/api/progress?path={name}")
+    assert code == 200 and d["done"] == 1.0 and d["pending"] is False
+
+
+def test_analysis_waits_for_the_whole_document(server):
+    """wait=<s> holds the request until the result is ready: one call, no polling."""
+    name = _fresh(config.ROOT, "wait.flac")
+    code, _, body = get(server, f"/api/analysis?path={name}&wait=120")
+    d = json.loads(body)
+    assert code == 200 and set(d) == {"path", "meta", "analysis", "stats"}
+    assert d["path"] == name and d["meta"]["sampleRate"] == 48000
+    assert d["analysis"]["level"] == "ok" and d["stats"]["loudness"]["lufs"] is not None
+
+
+def test_analysis_failure_is_reported(server):
+    with open(os.path.join(config.ROOT, "broken.flac"), "wb") as f:
+        f.write(b"not audio at all")
+    code, _, body = get(server, "/api/analysis?path=broken.flac&wait=60")
+    assert code == 500 and "analysis failed" in json.loads(body)["error"]
+
+
+def test_stored_analysis_loads_without_decoding(server):
+    """After a restart (memory caches empty) and with the decoded PCM evicted,
+    a stored analysis is answered without decoding the file again."""
+    from simpleaudiospectral.analysis import jobs
+
+    name = "Artist/Album/01 real.flac"
+    full = os.path.join(config.ROOT, name)
+    assert jget(server, f"/api/info?path={name.replace(' ', '%20')}")[0] == 200
+    pcm_file = pcm.PCM.file_for(full)
+    jobs.ANALYSES.clear()
+    pcm.PCM.maps.clear()
+    os.unlink(pcm_file)
+    code, _, _ = get(server, f"/api/info?path={name.replace(' ', '%20')}")
+    assert code == 200 and not os.path.exists(pcm_file)
