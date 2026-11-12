@@ -19,7 +19,7 @@ import numpy as np
 from .. import config, dsp, formats, tools
 from ..pcm import filename, read_rows
 from ..views import WAVE_BLOCK
-from .external import bit_usage, loudness
+from .external import bit_usage, bit_usage_pcm, loudness, pcm_exact_for_bits
 from .levels import FULL_SCALE, dynamics, quiet_floor, side_level_db
 from .lowpass import HF_BAND_START, HF_N, HF_REF_BAND, SPEC_N, hf_band_top, lowpass
 from .report import analysis_result
@@ -57,7 +57,12 @@ class SideJobs:
         raw = (filename(mm), sr, mm.shape[1])
         jobs = {"loudness": lambda: loudness(path, raw, lambda f: progress("loudness", f))}
         if formats.is_lossless(meta["codecName"]):
-            jobs["bits"] = lambda: bit_usage(path, meta, lambda f: progress("bits", f))
+            # From the decoded PCM on the cache disk where that is exact; the
+            # source otherwise (a second decode from the library disk).
+            if pcm_exact_for_bits(meta):
+                jobs["bits"] = lambda: bit_usage_pcm(raw[0], meta, lambda f: progress("bits", f))
+            else:
+                jobs["bits"] = lambda: bit_usage(path, meta, lambda f: progress("bits", f))
         if ext in formats.SOX_BITDEPTH:
             jobs["soxbits"] = lambda: tools.sox_bitdepth(path, lambda f: progress("soxbits", f))
         self.out: dict = {}

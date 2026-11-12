@@ -5,6 +5,7 @@ Commands are argv lists, never a shell. Library files can come from anywhere
 file that is really a playlist or concat script cannot make them fetch URLs.
 """
 
+import collections
 import json
 import os
 import re
@@ -27,8 +28,18 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, timeout=config.TIMEOUT, check=False, **kw)
 
 
-def ffprobe(path: str) -> dict:
-    """Codec, format and tags of the first audio stream."""
+_PROBES: collections.OrderedDict = collections.OrderedDict()  # (path, mtime) -> ffprobe JSON
+_PROBE_LOCK = threading.Lock()
+
+
+def _probe(path: str) -> dict:
+    """ffprobe's format and streams of `path`, once per file version: on a busy
+    library disk each probe is a seek, and one analysis needs it three times."""
+    key = (path, os.path.getmtime(path))
+    with _PROBE_LOCK:
+        if key in _PROBES:
+            _PROBES.move_to_end(key)
+            return _PROBES[key]
     p = run(
         ["ffprobe", "-v", "error", *NO_NET, "-print_format", "json", "-show_format", "-show_streams", path]
     )
@@ -36,7 +47,22 @@ def ffprobe(path: str) -> dict:
         data = json.loads(p.stdout or b"{}")
     except ValueError:
         data = {}
-    audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+    if p.returncode == 0:
+        with _PROBE_LOCK:
+            _PROBES[key] = data
+            while len(_PROBES) > 512:
+                _PROBES.popitem(last=False)
+    return data
+
+
+def _audio(data: dict) -> dict:
+    return next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+
+
+def ffprobe(path: str) -> dict:
+    """Codec, format and tags of the first audio stream."""
+    data = _probe(path)
+    audio = _audio(data)
     fmt = data.get("format", {})
     tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
     tags.update({k.lower(): v for k, v in (audio.get("tags") or {}).items()})
@@ -61,23 +87,8 @@ def ffprobe(path: str) -> dict:
 def stream_layout(path: str) -> tuple[int, int, float]:
     """(sample rate, channels capped at 2, duration in seconds or 0) of the
     first audio stream."""
-    p = run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            *NO_NET,
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=sample_rate,channels,duration:format=duration",
-            "-of",
-            "json",
-            path,
-        ]
-    )
-    data = json.loads(p.stdout or b"{}")
-    st = (data.get("streams") or [{}])[0]
+    data = _probe(path)
+    st = _audio(data)
     dur = _float(st.get("duration")) or _float((data.get("format") or {}).get("duration"))
     return int(st.get("sample_rate") or 44100), max(1, min(2, int(st.get("channels") or 1))), dur
 

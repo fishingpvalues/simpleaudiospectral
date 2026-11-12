@@ -322,3 +322,29 @@ def test_pipeline_equals_direct_functions(small_chunks, tmp_path, monkeypatch):
     for ch in ("left", "right", "side"):
         (p90,), _ = dsp.spectrum_percentiles(pcm.PCM.get(str(f), ch)[0], sr, qs=(90,))
         assert res["stats"]["channelCutoffs"][ch] == lowpass(p90, None, sr)["cutoff_hz"]
+
+
+@pytest.mark.parametrize(
+    ("fmt", "bits", "ch"),
+    [("s16", 16, 2), ("s32", 24, 2), ("s32", 24, 1), ("s16", 16, 1)],
+)
+def test_bit_usage_from_pcm_matches_the_source_decode(library, tmp_path, fmt, bits, ch):
+    """The decoded float32 PCM gives the same per-bit counts as a second s32
+    decode of the source, for every integer format it is used for."""
+    from simpleaudiospectral import tools
+    from simpleaudiospectral.analysis.external import bit_usage_pcm, pcm_exact_for_bits
+
+    f = tmp_path / f"t{bits}{ch}.flac"
+    extra = ["-bits_per_raw_sample", "24"] if bits == 24 else []
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i"),
+            "anoisesrc=d=7:c=pink:a=0.5:seed=3",
+            *("-ac", str(ch), "-ar", "44100", "-sample_fmt", fmt, *extra, str(f)),
+        ],
+        check=True,
+    )
+    meta = tools.ffprobe(str(f))
+    assert meta["bits"] == bits and pcm_exact_for_bits(meta)
+    mm, _ = pcm.PCM.open(str(f))
+    assert bit_usage_pcm(pcm.filename(mm), meta) == bit_usage(str(f), meta)
